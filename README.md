@@ -1,38 +1,75 @@
 <p align="center">
+  <svg width="80" height="80" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path d="M32 11L54 49H10Z" stroke="#eef1f8" stroke-width="3" fill="none" stroke-linejoin="round"/>
+    <circle cx="43" cy="23" r="11" stroke="#eef1f8" stroke-width="3" fill="none"/>
+    <line x1="36" y1="16" x2="50" y2="30" stroke="#eef1f8" stroke-width="3" stroke-linecap="round"/>
+    <line x1="50" y1="16" x2="36" y2="30" stroke="#eef1f8" stroke-width="3" stroke-linecap="round"/>
+  </svg>
+</p>
+
+<p align="center">
+  <strong>Self-hosted evaluation platform for coding agents</strong>
+</p>
+
+<p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License"></a>
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10%2B-blue.svg" alt="Python 3.10+"></a>
+  <img src="https://img.shields.io/badge/docker-required-2496ED.svg" alt="Docker">
+  <img src="https://img.shields.io/badge/phase-1-orange.svg" alt="Phase 1">
+  <a href="https://github.com/tracetensor/tracetensor/blob/main/CHANGELOG.md"><img src="https://img.shields.io/badge/version-0.1.0-green.svg" alt="Version"></a>
 </p>
+
+---
 
 # TraceTensor
 
-Self-hosted evaluation platform for coding agents. Run any agent (Claude Code, Codex, mini-swe, or your own) against any task, inside isolated Docker sandboxes, and get reproducible pass/fail scores.
+Run any coding agent (Claude Code, Codex, mini-swe, or your own) against any task, inside isolated Docker sandboxes, and get reproducible pass/fail scores.
 
 **No cloud dependency. No data leaves your machine. You own the results.**
 
-## Quickstart
+## ✨ Features
+
+- **Self-hosted** — Run everything locally in Docker. No cloud APIs, no data upload
+- **Agent-agnostic** — Support for Claude Code, Codex, mini-swe, Anthropic API, OpenAI API, OpenRouter
+- **Isolated execution** — Each trial runs in its own container with no side effects
+- **Reproducible scoring** — Verifier produces JSON reward scores; compare agents × models
+- **Horizontal scaling** — Optional Postgres + Redis for multi-worker setups
+- **9 CLI commands** — `run`, `serve`, `tasks`, `dataset`, `vault`, `version`, and more
+- **Task marketplace** — 20+ ready-to-use examples (test-suite, pr-suite, agentic-suite, etc.)
+
+## 🚀 Quick Start
+
+### Prerequisites
+- Docker 27.0+
+- Python 3.10+
+- One or more LLM API keys (optional; `oracle` runs free)
+
+### Installation
 
 ```bash
-# 1. Clone and configure
+# 1. Clone the repository
 git clone https://github.com/tracetensor/tracetensor.git
 cd tracetensor
-cp .env.example .env
-# Edit .env — add at least one LLM API key (ANTHROPIC_API_KEY, OPENAI_API_KEY, etc.)
 
-# 2. Start the stack
+# 2. Configure environment
+cp .env.example .env
+# Edit .env — add ANTHROPIC_API_KEY, OPENAI_API_KEY, or OPENROUTER_API_KEY
+
+# 3. Start the stack (Postgres + Redis + API)
 docker compose up -d
 
-# 3. Install the CLI
+# 4. Install the CLI
 pip install -e backend/
 
-# 4. Run your first evaluation
+# 5. Run your first evaluation
 tracetensor run examples/fix-add -a oracle
 ```
 
 You should see:
 
 ```
-Trial  Result  Reward  Time
-   #1  ✓ pass   1.000  1.4s
+Trial  Result  Reward   Time  Steps  Tokens  Cost
+   #1  ✓ pass   1.000  1.4s      2       —     —
 
 ╭───────── result ─────────╮
 │  pass rate  1/1  (100%)  │
@@ -40,7 +77,7 @@ Trial  Result  Reward  Time
 ╰──────────────────────────╯
 ```
 
-## Run a real agent
+## 📊 Run Real Agents
 
 ```bash
 # Claude Code with Sonnet
@@ -50,7 +87,7 @@ tracetensor run examples/fix-add -a claude-code -m claude-sonnet-4-6 -n 3
 tracetensor dataset run examples/test-suite -a claude-code -m claude-sonnet-4-6
 ```
 
-## Supported agents
+## 🤖 Supported Agents
 
 | Agent | Type | Required key |
 |-------|------|-------------|
@@ -62,7 +99,7 @@ tracetensor dataset run examples/test-suite -a claude-code -m claude-sonnet-4-6
 | `openai` | OpenAI API via litellm | `OPENAI_API_KEY` |
 | `openrouter` | OpenRouter API via litellm | `OPENROUTER_API_KEY` |
 
-## Task format
+## 📝 Task Format
 
 A task is a directory with this layout:
 
@@ -179,10 +216,23 @@ Run them all:
 tracetensor dataset run examples/test-suite -a oracle
 ```
 
-## Task format interoperability
+## 📚 Documentation
+
+- [ARCHITECTURE.md](ARCHITECTURE.md) — System design and internals
+- [SECURITY.md](SECURITY.md) — Security guidelines and threat model
+- [CHANGELOG.md](CHANGELOG.md) — Version history and release notes
+- [CONTRIBUTING.md](CONTRIBUTING.md) — How to contribute
+
+## 🔄 Task Format Interoperability
 
 TraceTensor uses the same task folder convention (`instruction.md`, `task.toml`, `tests/test.sh`) established by the open evaluation community. Tasks written for other harnesses that follow this layout can run on TraceTensor without modification.
 
-## License
+## 💬 Community
+
+- **Issues** — [GitHub Issues](https://github.com/tracetensor/tracetensor/issues) for bug reports and feature requests
+- **Discussions** — [GitHub Discussions](https://github.com/tracetensor/tracetensor/discussions) for Q&A
+- **Contributing** — See [CONTRIBUTING.md](CONTRIBUTING.md)
+
+## 📄 License
 
 Apache 2.0 — see [LICENSE](LICENSE).
