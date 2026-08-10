@@ -1,5 +1,9 @@
 
 <p align="center">
+  <img src=".github/logo.svg" alt="TraceTensor" width="120" height="120">
+</p>
+
+<p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License"></a>
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10%2B-blue.svg" alt="Python 3.10+"></a>
   <img src="https://img.shields.io/badge/docker-required-2496ED.svg" alt="Docker">
@@ -17,7 +21,7 @@ Run any coding agent (Claude Code, Codex, mini-swe, or your own) against any tas
 
 ## Features
 
-- **Self-hosted** — Run everything locally in Docker. No cloud APIs, no data upload
+- **Self-hosted** — Run everything locally in Docker. No external dependencies
 - **Agent-agnostic** — Support for Claude Code, Codex, mini-swe, Anthropic API, OpenAI API, OpenRouter
 - **Isolated execution** — Each trial runs in its own container with no side effects
 - **Reproducible scoring** — Verifier produces JSON reward scores; compare agents × models
@@ -210,6 +214,27 @@ tracetensor dataset run examples/test-suite -a oracle
 - [SECURITY.md](SECURITY.md) — Security guidelines and threat model
 - [CHANGELOG.md](CHANGELOG.md) — Version history and release notes
 - [CONTRIBUTING.md](CONTRIBUTING.md) — How to contribute
+
+## Vault: Local Run Storage
+
+Every trial run is saved to your local Vault — a complete record of all evaluations. Access your results anytime:
+
+```bash
+# List all runs
+tracetensor vault list
+
+# Inspect a specific run (full trajectory, logs, costs)
+tracetensor vault show run-2026-08-10-143241
+
+# Export run data for analysis
+tracetensor vault export run-2026-08-10-143241 -o results.json
+```
+
+The Vault stores:
+- Trial results (pass/fail, reward scores)
+- Execution logs and agent trajectories
+- Cost breakdown (API tokens used, estimated cost)
+- Full environment state
 
 ## Task Format Interoperability
 
