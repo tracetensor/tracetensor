@@ -1,6 +1,6 @@
 
 <p align="center">
-  <img src=".github/logo.svg" alt="TraceTensor" width="120" height="120">
+  <img src=".github/logo.png" alt="TraceTensor" width="120" height="120">
 </p>
 
 <p align="center">
