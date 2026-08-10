@@ -1,0 +1,20 @@
+schema_version = "1.3"
+
+[task]
+name = "tracetensor/agentic-suite/05-fix-manifest-builder"
+description = "Agentic: fix project manifest path walk."
+keywords = ["python", "bugfix", "agentic", "medium"]
+
+[metadata]
+difficulty_explanation = "medium-hard — walk tree + relative paths."
+category = "programming"
+
+[verifier]
+timeout_sec = 90.0
+
+[agent]
+timeout_sec = 500.0
+
+[environment]
+network_mode = "public"
+build_timeout_sec = 120.0

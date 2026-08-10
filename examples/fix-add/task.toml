@@ -1,0 +1,23 @@
+schema_version = "1.3"
+
+[task]
+name = "tracetensor/fix-add"
+description = "Fix a one-line bug so add(a, b) returns a + b."
+authors = [{ name = "Rahul" }]
+keywords = ["python", "bugfix", "agent"]
+
+[metadata]
+difficulty_explanation = "One-line fix — ideal for validating a real coding agent end to end."
+category = "programming"
+
+[verifier]
+timeout_sec = 60.0
+
+[agent]
+timeout_sec = 400.0
+
+[environment]
+# Installed agents (mini-swe) run IN the container and call the model API from
+# there, so this task needs network egress.
+network_mode = "public"
+build_timeout_sec = 600.0

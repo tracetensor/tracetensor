@@ -1,0 +1,46 @@
+__pycache__/
+*.pyc
+*.db
+_tasks/
+.env
+backend/.env
+.venv/
+venv/
+backend/venv/
+tasks/
+*.zip
+.DS_Store
+
+# coverage / test artifacts
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# deployment secrets (hardened compose)
+secrets/*
+!secrets/.gitkeep
+
+# python build artifacts
+*.egg-info/
+build/
+dist/
+runs/
+vault-export/
+
+# scratch / local state
+.scratch/
+.tracetensor/
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Local notes / chat dumps
+claude_share_*
+
+# Internal product strategy (lives in tracetensor-full, not OSS)
+ideas/
+
+# Task-store artifacts written by local runs / tests (TASKS_ROOT).
+backend/_tasks_test/
+backend/_tasks/

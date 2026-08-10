@@ -1,0 +1,112 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      # H-3: credentials come from the environment (or a .env file at the repo
+      # root), not hardcoded here. Copy .env.example → .env and set a strong
+      # POSTGRES_PASSWORD before any networked deployment.
+      POSTGRES_USER: ${POSTGRES_USER:-tracetensor}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tracetensor}
+      POSTGRES_DB: ${POSTGRES_DB:-tracetensor}
+    # H-3: postgres is NOT exposed to the host by default. It is reachable only
+    # on the internal compose network (by the api/worker/backup services).
+    # If you need direct psql access during development, add:
+    #   ports: ["127.0.0.1:5432:5432"]   ← loopback only, not 0.0.0.0
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tracetensor}"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: ./backend
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-tracetensor}:${POSTGRES_PASSWORD:-tracetensor}@db:5432/${POSTGRES_DB:-tracetensor}
+      TASKS_ROOT: /data/tasks
+      CORS_ORIGINS: http://localhost:8000,http://localhost:5173
+      # Single-node default: the API also runs a worker (embedded), so jobs
+      # execute out of the box with no extra services. To scale execution across
+      # machines instead, set this to "false" and run the `worker` service below
+      # (docker compose --profile scale up --scale worker=4).
+      WORKER_EMBEDDED: ${WORKER_EMBEDDED:-true}
+      # H-1: set API_TOKEN to a random secret before exposing beyond localhost.
+      # Without it the API is unauthenticated (fine for local dev; dangerous on a
+      # networked host). Generate one: openssl rand -hex 32
+      API_TOKEN: ${API_TOKEN:-}
+      # LLM keys pass through from your shell / root .env (blank = provider off).
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+    ports:
+      - "8000:8000"
+    healthcheck:
+      # Liveness via the app's own probe (python is in the image; curl may not be).
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/api/health').status==200 else 1)\""]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    volumes:
+      - taskdata:/data/tasks
+      # C-2: mounting the host Docker socket grants the container (and any code
+      # it runs) host-level Docker access — equivalent to root on the host.
+      # This is expected for a self-hosted orchestrator that spawns agent
+      # sandboxes, but it means you MUST run this on trusted infrastructure.
+      # For a hardened deployment use docker-compose.hardened.yml instead, which
+      # routes through a docker-socket-proxy that limits API surface.
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  # Standalone job workers — the horizontal-scale path. They share the same
+  # Postgres queue as the API and claim work with SELECT ... FOR UPDATE SKIP
+  # LOCKED, so you can run as many as you like on as many machines as you like.
+  # Only starts under the `scale` profile; set the API's WORKER_EMBEDDED=false
+  # so it stops double-running work:
+  #   WORKER_EMBEDDED=false docker compose --profile scale up --scale worker=4
+  worker:
+    build: ./backend
+    profiles: ["scale"]
+    command: ["python", "-m", "app.worker"]
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-tracetensor}:${POSTGRES_PASSWORD:-tracetensor}@db:5432/${POSTGRES_DB:-tracetensor}
+      TASKS_ROOT: /data/tasks
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+    volumes:
+      - taskdata:/data/tasks
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  # Scheduled database backups — a sidecar that runs scripts/db_backup.sh on an
+  # interval, writing timestamped dumps to the `backups` volume and pruning old
+  # ones. Opt-in via the `backup` profile so plain `up` stays lean:
+  #   docker compose --profile backup up -d backup
+  # Restore any dump with scripts/db_restore.sh (see docs/OPERATIONS.md).
+  backup:
+    image: postgres:16-alpine
+    profiles: ["backup"]
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-tracetensor}:${POSTGRES_PASSWORD:-tracetensor}@db:5432/${POSTGRES_DB:-tracetensor}
+      BACKUP_INTERVAL_SEC: ${BACKUP_INTERVAL_SEC:-86400}   # daily by default
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
+    volumes:
+      - ./scripts:/scripts:ro
+      - backups:/backups
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - 'while true; do /scripts/db_backup.sh /backups || echo "backup failed" >&2; sleep "$${BACKUP_INTERVAL_SEC}"; done'
+
+volumes:
+  pgdata:
+  taskdata:
+  backups:

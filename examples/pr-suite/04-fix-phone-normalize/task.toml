@@ -1,0 +1,20 @@
+schema_version = "1.3"
+
+[task]
+name = "tracetensor/pr-suite/04-fix-phone-normalize"
+description = "PR-style: fix E.164 phone normalization."
+keywords = ["python", "bugfix", "pr", "hard"]
+
+[metadata]
+difficulty_explanation = "hard — strips/format bug in phone helper."
+category = "programming"
+
+[verifier]
+timeout_sec = 60.0
+
+[agent]
+timeout_sec = 400.0
+
+[environment]
+network_mode = "public"
+build_timeout_sec = 120.0

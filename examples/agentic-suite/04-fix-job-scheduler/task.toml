@@ -1,0 +1,20 @@
+schema_version = "1.3"
+
+[task]
+name = "tracetensor/agentic-suite/04-fix-job-scheduler"
+description = "Agentic: fix priority job queue pop order."
+keywords = ["python", "bugfix", "agentic", "hard"]
+
+[metadata]
+difficulty_explanation = "hard — priority queue picks lowest not highest."
+category = "programming"
+
+[verifier]
+timeout_sec = 90.0
+
+[agent]
+timeout_sec = 500.0
+
+[environment]
+network_mode = "public"
+build_timeout_sec = 120.0

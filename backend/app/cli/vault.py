@@ -1,0 +1,267 @@
+"""
+`tracetensor vault` — local (and optional --server) browse / show / export of runs.
+
+Phase 1: local `runs/` + server job history. Remote share (`push`) is Phase 2.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Optional
+
+import typer
+from rich.table import Table
+
+from app.cli import console as ui
+from app.services import vault as vault_svc
+from app.services.cost import cost_enabled
+
+vault_app = typer.Typer(
+    help="Browse and export saved trial results (local Vault).",
+    no_args_is_help=True,
+)
+
+
+@vault_app.command("list")
+def list_cmd(
+    runs: Path = typer.Option(Path("runs"), "--runs", help="Local runs directory."),
+    server: Optional[str] = typer.Option(
+        None, "--server", help="List jobs from a running `tracetensor serve`."
+    ),
+    token: Optional[str] = typer.Option(
+        None, "--token", envvar="TRACETENSOR_TOKEN", help="API token if the server is secured."
+    ),
+) -> None:
+    """List saved runs (local `runs/` and/or a --server)."""
+    ui.banner()
+    if server:
+        from app.cli import client
+
+        try:
+            jobs = client.list_jobs(server.rstrip("/"), token)
+        except client.ServerError as e:
+            ui.error(str(e))
+            raise typer.Exit(1) from e
+        if not jobs:
+            ui.hint("No jobs on the server yet.")
+            return
+        t = Table(box=None, pad_edge=False, expand=False)
+        t.add_column("Job", style="muted")
+        t.add_column("Task")
+        t.add_column("Agent")
+        t.add_column("Pass", justify="right")
+        t.add_column("Time", justify="right", style="muted")
+        t.add_column("Tokens", justify="right", style="muted")
+        if cost_enabled():
+            t.add_column("Cost", justify="right", style="muted")
+        for j in jobs:
+            if j.get("dataset_run_id"):
+                continue
+            rate = j.get("pass_rate")
+            rate_s = "—" if rate is None else f"{round(rate * 100)}%"
+            dur = j.get("duration_s")
+            dur_s = "—" if dur is None else f"{dur:.1f}s"
+            if j.get("input_tokens") is not None or j.get("output_tokens") is not None:
+                tok = (
+                    f"{vault_svc.format_tokens(j.get('input_tokens'))}/"
+                    f"{vault_svc.format_tokens(j.get('output_tokens'))}"
+                )
+            else:
+                tok = "—"
+            row = [
+                str(j.get("id", ""))[:8],
+                str(j.get("task_name") or j.get("task_id") or "")[:28],
+                f"{j.get('agent')}" + (f" · {j['model']}" if j.get("model") else ""),
+                rate_s,
+                dur_s,
+                tok,
+            ]
+            if cost_enabled():
+                row.append(vault_svc.format_cost(j.get("cost_usd")))
+            t.add_row(*row)
+        ui.console.print(t)
+        return
+
+    rows = vault_svc.list_local_runs(runs)
+    if not rows:
+        ui.hint(f"No local runs under {runs.resolve()} — run a task first.")
+        return
+    t = Table(box=None, pad_edge=False, expand=False)
+    t.add_column("Id", style="muted")
+    t.add_column("Task")
+    t.add_column("Agent")
+    t.add_column("Pass", justify="right")
+    t.add_column("Time", justify="right", style="muted")
+    t.add_column("Tokens", justify="right", style="muted")
+    if cost_enabled():
+        t.add_column("Cost", justify="right", style="muted")
+    for r in rows:
+        rate = r.get("pass_rate")
+        rate_s = "—" if rate is None else f"{round(rate * 100)}%"
+        dur = r.get("duration_s")
+        dur_s = "—" if dur is None else f"{dur:.1f}s"
+        if r.get("input_tokens") is not None:
+            tok = (
+                f"{vault_svc.format_tokens(r.get('input_tokens'))}/"
+                f"{vault_svc.format_tokens(r.get('output_tokens'))}"
+            )
+        else:
+            tok = "—"
+        row = [
+            str(r["id"])[:40],
+            str(r.get("task") or "")[:28],
+            f"{r.get('agent')}" + (f" · {r['model']}" if r.get("model") else ""),
+            rate_s,
+            dur_s,
+            tok,
+        ]
+        if cost_enabled():
+            row.append(vault_svc.format_cost(r.get("cost_usd")))
+        t.add_row(*row)
+    ui.console.print(t)
+    ui.hint(f"local Vault · {runs.resolve()}")
+
+
+@vault_app.command("show")
+def show_cmd(
+    run_id: str = typer.Argument(..., help="Local run directory name/path, or server job UUID."),
+    runs: Path = typer.Option(Path("runs"), "--runs", help="Local runs directory."),
+    server: Optional[str] = typer.Option(
+        None, "--server", help="Fetch the job from a running server."
+    ),
+    token: Optional[str] = typer.Option(
+        None, "--token", envvar="TRACETENSOR_TOKEN", help="API token if the server is secured."
+    ),
+) -> None:
+    """Show one saved run (summary + per-trial table)."""
+    ui.banner()
+    if server:
+        from app.cli import client
+
+        try:
+            job = client.get_job(server.rstrip("/"), run_id, token)
+        except client.ServerError as e:
+            ui.error(str(e))
+            raise typer.Exit(1) from e
+        trials_raw = job.get("trials") or []
+        usage = vault_svc.rollup_usage(trials_raw)
+        rows = [
+            ("task", str(job.get("task_name") or job.get("task_id"))),
+            ("agent", job.get("agent", "") + (f" · {job['model']}" if job.get("model") else "")),
+            ("status", str(job.get("status"))),
+            (
+                "pass",
+                f"{job.get('trials_passed', 0)}/{job.get('n_trials', 0)}"
+                + (
+                    f"  ({job['pass_rate'] * 100:.0f}%)" if job.get("pass_rate") is not None else ""
+                ),
+            ),
+            (
+                "usage",
+                vault_svc.format_usage_line(
+                    usage.input_tokens, usage.output_tokens, usage.cost_usd
+                ),
+            ),
+        ]
+        ui.console.print(ui.kv_panel("vault", rows))
+        trial_rows = []
+        for t in trials_raw:
+            u = vault_svc.usage_from_trajectory(t.get("trajectory"))
+            trial_rows.append(
+                {
+                    "n": t.get("trial_num", 0),
+                    "passed": t.get("passed"),
+                    "reward": t.get("reward"),
+                    "duration_s": t.get("duration_s"),
+                    "steps": len((t.get("trajectory") or {}).get("steps", []) or []),
+                    "input_tokens": u.input_tokens if u.calls else None,
+                    "output_tokens": u.output_tokens if u.calls else None,
+                    "cost_usd": u.cost_usd,
+                }
+            )
+        ui.console.print()
+        ui.console.print(ui.runs_table(trial_rows))
+        return
+
+    try:
+        run_dir = vault_svc.resolve_local_run(runs, run_id)
+        data = vault_svc.load_local_run(run_dir)
+    except FileNotFoundError as e:
+        ui.error(str(e))
+        raise typer.Exit(2) from e
+    # A different shape from the server branch's UsageRollup — this one is the
+    # raw dict as it was written to result.json — so it gets its own name.
+    local_usage = data.get("usage") or {}
+    agent_s = str(data.get("agent") or "")
+    if data.get("model"):
+        agent_s += f" · {data['model']}"
+    rows = [
+        ("id", data.get("id", "")),
+        ("task", str(data.get("task"))),
+        ("agent", agent_s),
+        ("pass", f"{data.get('passed', 0)}/{data.get('n_trials', 0)}"),
+        ("wall", f"{data.get('wall_s')}s" if data.get("wall_s") is not None else "—"),
+        (
+            "usage",
+            vault_svc.format_usage_line(
+                local_usage.get("input_tokens"),
+                local_usage.get("output_tokens"),
+                local_usage.get("cost_usd"),
+            ),
+        ),
+        ("path", data.get("path", "")),
+    ]
+    ui.console.print(ui.kv_panel("vault", rows))
+    trial_rows = []
+    for t in data.get("trials") or []:
+        u = vault_svc.usage_from_trajectory(t.get("trajectory"))
+        trial_rows.append(
+            {
+                "n": t.get("n", t.get("trial_num", 0)),
+                "passed": t.get("passed"),
+                "reward": t.get("reward"),
+                "duration_s": t.get("duration_s"),
+                "steps": t.get("steps")
+                if t.get("steps") is not None
+                else len((t.get("trajectory") or {}).get("steps", []) or []),
+                "input_tokens": u.input_tokens if u.calls else None,
+                "output_tokens": u.output_tokens if u.calls else None,
+                "cost_usd": u.cost_usd,
+            }
+        )
+    ui.console.print()
+    ui.console.print(ui.runs_table(trial_rows))
+
+
+@vault_app.command("export")
+def export_cmd(
+    run_id: str = typer.Argument(..., help="Local run directory name/path, or server job UUID."),
+    out: Path = typer.Option(Path("vault-export"), "-o", "--out", help="Output directory."),
+    runs: Path = typer.Option(Path("runs"), "--runs", help="Local runs directory."),
+    server: Optional[str] = typer.Option(
+        None, "--server", help="Export a job from a running server."
+    ),
+    token: Optional[str] = typer.Option(
+        None, "--token", envvar="TRACETENSOR_TOKEN", help="API token if the server is secured."
+    ),
+) -> None:
+    """Write a portable archive of one run (JSON)."""
+    ui.banner()
+    if server:
+        from app.cli import client
+
+        try:
+            job = client.get_job(server.rstrip("/"), run_id, token)
+            path = vault_svc.export_job_dict(job, out, run_id)
+        except (client.ServerError, OSError) as e:
+            ui.error(str(e))
+            raise typer.Exit(1) from e
+        ui.hint(f"exported → {path}")
+        return
+    try:
+        run_dir = vault_svc.resolve_local_run(runs, run_id)
+        dest = vault_svc.export_local_run(run_dir, out)
+    except (FileNotFoundError, OSError) as e:
+        ui.error(str(e))
+        raise typer.Exit(2) from e
+    ui.hint(f"exported → {dest}")

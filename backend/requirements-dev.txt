@@ -1,0 +1,18 @@
+# Dev + CI tooling, pinned so a workstation and CI run the EXACT same versions
+# (a lint/format pass that's green locally must be green in CI). Runtime deps
+# live in requirements.txt; this file layers the tools on top.
+#
+#   pip install -r requirements-dev.txt
+
+-r requirements.txt
+
+ruff==0.15.20          # linter + formatter (backend Python)
+mypy==1.19.1           # type-check (advisory)
+coverage==7.10.7       # coverage over the deterministic suite
+pytest==9.1.1          # unit-test runner (the legacy script suites run under it too)
+pytest-asyncio==1.4.0  # async test support (the service layer is async)
+playwright==1.57.0     # browser smoke tests over the dashboard (tests/test_frontend_smoke.py)
+                       #   after installing: `playwright install chromium`
+pre-commit==4.3.0      # git pre-commit hooks
+esprima==4.0.1         # frontend inline-JS syntax check (scripts/validate_frontend.py)
+tiktoken==0.9.0        # repo token counter (scripts/count_repo_tokens.py)

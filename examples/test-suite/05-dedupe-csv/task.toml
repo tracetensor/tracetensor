@@ -1,0 +1,20 @@
+schema_version = "1.3"
+
+[task]
+name = "tracetensor/test-suite/05-dedupe-csv"
+description = "Deduplicate CSV rows by email, keeping first occurrence."
+keywords = ["csv", "data", "medium"]
+
+[metadata]
+difficulty_explanation = "medium — CSV parsing and deterministic deduplication."
+category = "data-processing"
+
+[verifier]
+timeout_sec = 45.0
+
+[agent]
+timeout_sec = 120.0
+
+[environment]
+network_mode = "no-network"
+build_timeout_sec = 120.0

@@ -1,0 +1,20 @@
+schema_version = "1.3"
+
+[task]
+name = "tracetensor/test-suite/03-json-pretty"
+description = "Pretty-print minified JSON with sorted keys."
+keywords = ["json", "easy"]
+
+[metadata]
+difficulty_explanation = "easy — parse JSON and rewrite with formatting rules."
+category = "programming"
+
+[verifier]
+timeout_sec = 30.0
+
+[agent]
+timeout_sec = 90.0
+
+[environment]
+network_mode = "no-network"
+build_timeout_sec = 120.0

@@ -1,0 +1,8 @@
+region,amount,status,date
+north,100,completed,2024-01-01
+north,50,pending,2024-01-02
+south,200,completed,2024-01-01
+south,30,completed,2024-01-03
+east,80,cancelled,2024-01-01
+east,120,completed,2024-01-02
+west,15,completed,2024-01-04

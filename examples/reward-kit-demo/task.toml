@@ -1,0 +1,19 @@
+schema_version = "1.3"
+
+[task]
+name = "tracetensor/reward-kit-demo"
+description = "Two weighted criteria (correctness, brevity) combined via a Reward Kit reward.toml — not a single pass/fail."
+keywords = ["reward-kit", "weighted", "partial-credit"]
+
+[environment]
+docker_image = "python:3.11-slim"
+workdir = "/app"
+# Built-in-loop agents call the model on the host, so the container needs no
+# egress (mirrors examples/haiku-judge).
+network_mode = "no-network"
+
+[agent]
+timeout_sec = 120.0
+
+[verifier]
+timeout_sec = 60.0

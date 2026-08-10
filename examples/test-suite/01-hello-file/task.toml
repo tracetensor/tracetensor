@@ -1,0 +1,20 @@
+schema_version = "1.3"
+
+[task]
+name = "tracetensor/test-suite/01-hello-file"
+description = "Write an exact greeting string to a file."
+keywords = ["file-io", "easy"]
+
+[metadata]
+difficulty_explanation = "easy — single file write with exact content."
+category = "programming"
+
+[verifier]
+timeout_sec = 30.0
+
+[agent]
+timeout_sec = 60.0
+
+[environment]
+network_mode = "no-network"
+build_timeout_sec = 120.0

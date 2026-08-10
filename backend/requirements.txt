@@ -1,0 +1,21 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+sqlalchemy[asyncio]==2.0.36
+alembic==1.16.5
+asyncpg==0.30.0
+psycopg2-binary==2.9.10
+aiosqlite==0.20.0
+pydantic>=2.12.3,<3
+python-multipart==0.0.20
+tomli==2.2.1; python_version < "3.11"
+
+# Stage 2 LLM agents (real keys). OpenRouter uses the OpenAI SDK + base_url.
+anthropic>=0.40.0
+openai>=1.50.0
+# Workspace evaluation control plane (requires Python 3.10+).
+openai-agents>=0.8.4
+
+# CLI (the `tracetensor` command): Typer for the command tree, Rich for the
+# branded terminal output.
+typer>=0.12
+rich>=13.7

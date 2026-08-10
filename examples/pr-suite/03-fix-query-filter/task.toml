@@ -1,0 +1,20 @@
+schema_version = "1.3"
+
+[task]
+name = "tracetensor/pr-suite/03-fix-query-filter"
+description = "PR-style: fix AND/OR precedence in query filter."
+keywords = ["python", "bugfix", "pr", "hard"]
+
+[metadata]
+difficulty_explanation = "hard — boolean precedence bug in filter DSL."
+category = "programming"
+
+[verifier]
+timeout_sec = 60.0
+
+[agent]
+timeout_sec = 400.0
+
+[environment]
+network_mode = "public"
+build_timeout_sec = 120.0

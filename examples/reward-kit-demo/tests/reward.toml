@@ -1,0 +1,7 @@
+# Reward Kit spec — how the two named criteria in reward.json roll up into one
+# scalar reward. Correctness matters much more than brevity here.
+aggregate = "weighted_mean"
+
+[weights]
+correctness = 0.8
+brevity = 0.2

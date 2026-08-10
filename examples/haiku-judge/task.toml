@@ -1,0 +1,22 @@
+schema_version = "1.3"
+
+[task]
+name = "tracetensor/haiku-judge"
+description = "Write a haiku about the ocean — graded by an LLM judge, not a test script."
+keywords = ["llm-judge", "open-ended"]
+
+[environment]
+docker_image = "python:3.11-slim"
+workdir = "/app"
+# The agent's model calls (built-in loop) and the judge both run on the host, so
+# the sandbox needs no network.
+network_mode = "no-network"
+
+[agent]
+timeout_sec = 120.0
+
+[verifier]
+type = "llm-judge"
+judge_model = "openai/gpt-4.1-mini"
+judge_output_path = "/app/answer.txt"
+rubric = "Score the OUTPUT as a haiku about the ocean. 1.0 = exactly three non-empty lines AND clearly about the ocean/sea. 0.5 = three lines but not about the ocean. 0.0 = not three lines, or empty."
