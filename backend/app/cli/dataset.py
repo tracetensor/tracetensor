@@ -42,11 +42,19 @@ def run_dataset(
     agent: str = typer.Option("mini-swe", "-a", "--agent", help="Agent to run on every task."),
     model: Optional[str] = typer.Option(None, "-m", "--model", help="Model id."),
     backend: str = typer.Option("docker", "--backend", help="Execution backend."),
-    timeout: float = typer.Option(1800.0, "--timeout", help="Per-task agent/verifier timeout (s)."),
+    timeout: float = typer.Option(1800.0, "--timeout", help="Per-task agent/verifier timeout (s) — used when task.toml has no [agent].timeout_sec."),
+    timeout_scale: float = typer.Option(
+        1.0,
+        "--timeout-scale",
+        min=0.1,
+        max=100.0,
+        help="Multiply per-task timeouts from task.toml (e.g. 2.0 for harder tasks).",
+    ),
     json_out: bool = typer.Option(False, "--json", help="Machine-readable output."),
 ) -> None:
     """Run one agent across every task in a dataset and grade each trial."""
     from app.cli.backends import ensure_backend_ready
+    from app.services.task_parser import parse_task_toml
     from app.services.trial_hints import enrich_trial_result, failure_hint_from_result
     from app.services.trial_runner import prebuild, run_trial
 
@@ -77,6 +85,20 @@ def run_dataset(
     for d in dirs:
         ipath = d / "instruction.md"
         instruction = ipath.read_text(errors="replace") if ipath.exists() else ""
+        # Per-task timeouts: prefer task.toml values (scaled), fall back to --timeout.
+        task_agent_to = timeout
+        task_verifier_to = timeout
+        tpath = d / "task.toml"
+        if tpath.exists():
+            try:
+                tcfg = parse_task_toml(tpath.read_bytes(), d)
+                task_agent_to = (tcfg.agent.timeout_sec or timeout) * timeout_scale
+                task_verifier_to = (tcfg.verifier.timeout_sec or timeout) * timeout_scale
+            except Exception:
+                pass  # parse errors surface properly inside run_trial
+        elif timeout_scale != 1.0:
+            task_agent_to = timeout * timeout_scale
+            task_verifier_to = timeout * timeout_scale
         t0 = time.time()
         try:
             prebuild(d, resolved_backend)
@@ -86,8 +108,8 @@ def run_dataset(
                 agent_name=agent,
                 model=model,
                 backend=resolved_backend,
-                agent_timeout=timeout,
-                verifier_timeout=timeout,
+                agent_timeout=task_agent_to,
+                verifier_timeout=task_verifier_to,
             )
         except Exception as e:  # one task never aborts the dataset
             results.append({"task": d.name, "error": str(e)[:200]})
