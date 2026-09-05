@@ -239,3 +239,28 @@ class TestMultiStep:
         outcome, _ = run(task_dir)
         assert outcome.status == "completed"
         assert "step_rewards" not in outcome.trajectory
+
+
+class TestSchemaVersion:
+    """B — every trajectory carries tt_schema_version so consumers can detect breakage."""
+
+    def test_single_step_trajectory_has_schema_version(self, task_dir):
+        outcome, _ = run(task_dir)
+        assert outcome.trajectory.get("tt_schema_version") == "1.0"
+
+    def test_multi_step_trajectory_has_schema_version(self, tmp_path):
+        d = tmp_path / "ms"
+        (d / "environment").mkdir(parents=True)
+        (d / "environment" / "Dockerfile").write_text("FROM busybox")
+        (d / "task.toml").write_text(
+            'schema_version = "1.3"\n[task]\nname = "test/ms"\n[environment]\nnetwork_mode = "no-network"\n'
+        )
+        for i, name in enumerate(["01-a", "02-b"], 1):
+            sd = d / "steps" / name
+            (sd / "tests").mkdir(parents=True)
+            (sd / "instruction.md").write_text(f"step {i}")
+            (sd / "tests" / "test.sh").write_text("#!/bin/sh\nexit 0\n")
+        env = FakeEnvironment(d)
+        env.files["/logs/verifier/reward.txt"] = "1.0"
+        outcome, _ = run(d, env=env)
+        assert outcome.trajectory.get("tt_schema_version") == "1.0"
