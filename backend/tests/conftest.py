@@ -218,7 +218,7 @@ class FakeAgent:
         self._error = error
         self._llm_calls = llm_calls or []
 
-    def run(self, instruction, env, timeout=None, on_event=None):
+    def run(self, instruction, env, timeout=None, on_event=None, setup_timeout=None):
         from app.services.agents.base import AgentResult
 
         steps = [env.exec(c, phase="agent") for c in self._commands]

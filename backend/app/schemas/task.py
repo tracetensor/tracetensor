@@ -60,6 +60,10 @@ class AgentConfig(BaseModel):
     """How the patient (agent) is allowed to work."""
 
     timeout_sec: Optional[float] = 120.0
+    # Dedicated budget for the agent install step (e.g. pip install, curl | bash).
+    # Consumed BEFORE the main agent_timeout clock starts, so install time does not
+    # eat into the agent's actual working budget. Only used by BaseInstalledAgent.
+    setup_timeout_sec: float = 360.0
     network_mode: Optional[str] = None  # phase override
     allowed_hosts: list[str] = Field(default_factory=list)
     user: Optional[str] = None

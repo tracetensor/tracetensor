@@ -36,6 +36,7 @@ class OracleAgent(BaseAgent):
         env: BaseEnvironment,
         timeout: Optional[float] = None,
         on_event: EventHook = None,
+        setup_timeout: Optional[float] = None,  # unused — no INSTALL step
     ) -> AgentResult:
         solve_dir = self.task_dir / "solution"
         if not (solve_dir / "solve.sh").exists():
