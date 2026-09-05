@@ -11,6 +11,7 @@ Returned TrialOutcome is what the router persists to the `trials` table.
 
 from __future__ import annotations
 
+import concurrent.futures as _cf
 import logging
 import time
 from dataclasses import dataclass, field
@@ -297,11 +298,30 @@ def _run_trial_once(
         verifier_user = str(cfg.verifier.user)
 
     env = environment_factory(backend, task_dir, **env_cfg)
+    setup_timeout = e.setup_timeout_sec  # wall-clock cap for container-start phase
 
     # 0. Build the room — this is the slow phase (Docker image build + container).
+    # build_timeout_sec guards the image build/pull; setup_timeout_sec guards the
+    # container-start and post-start execs that follow. Without this outer cap a
+    # hung sandbox provision can block the worker indefinitely.
     _phase(on_event, "setup", PhaseStatus.RUNNING, detail="building image")
     try:
-        env.setup()
+        with _cf.ThreadPoolExecutor(max_workers=1) as _pool:
+            _fut = _pool.submit(env.setup)
+            _fut.result(timeout=setup_timeout)
+    except _cf.TimeoutError:
+        try:
+            env.teardown()
+        except Exception:
+            pass
+        err = f"env.setup() timed out after {setup_timeout}s (container-start phase)"
+        _phase(on_event, "setup", PhaseStatus.ERROR, detail=err[:200])
+        log.error("trial_error", extra={"task": task_label, "phase": "setup", "error": err[:200]})
+        return TrialOutcome(
+            status=TrialStatus.ERROR.value,
+            error=f"Room setup failed: {err}",
+            duration_s=time.time() - start,
+        )
     except Exception as e:
         _phase(on_event, "setup", PhaseStatus.ERROR, detail=str(e)[:200])
         log.error(
