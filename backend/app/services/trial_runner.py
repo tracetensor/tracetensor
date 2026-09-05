@@ -285,6 +285,7 @@ def _run_trial_once(
     agent_net = cfg.agent.network_mode
     agent_allowed_hosts = cfg.agent.allowed_hosts
     agent_max_steps = cfg.agent.max_steps
+    agent_setup_timeout = cfg.agent.setup_timeout_sec  # dedicated install window
     verifier_net = cfg.verifier.network_mode
     separate_verifier = cfg.verifier.environment_mode == "separate"
     artifacts = list(cfg.artifacts)
@@ -351,7 +352,10 @@ def _run_trial_once(
             )
         _phase(on_event, "agent", PhaseStatus.RUNNING)
         agent = agent_factory(agent_name, task_dir, model=model, max_steps=agent_max_steps)
-        agent_result = agent.run(instruction, env, timeout=agent_timeout, on_event=on_event)
+        agent_result = agent.run(
+            instruction, env, timeout=agent_timeout, on_event=on_event,
+            setup_timeout=agent_setup_timeout,
+        )
         steps.extend(s.to_step() for s in agent_result.steps)
         _phase(on_event, "agent", PhaseStatus.DONE, agent_error=agent_result.error)
         agent_steps = [s for s in agent_result.steps if getattr(s, "phase", None) == "agent"]

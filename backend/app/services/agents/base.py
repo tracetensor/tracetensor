@@ -161,8 +161,12 @@ class BaseAgent(abc.ABC):
         env: BaseEnvironment,
         timeout: Optional[float] = None,
         on_event: EventHook = None,
+        setup_timeout: Optional[float] = None,
     ) -> "AgentResult":
         """Work on `instruction` inside `env` and return what happened.
+
+        `setup_timeout` is a dedicated window for agent install (BaseInstalledAgent
+        only). Built-in loop agents (LLMAgent, OracleAgent) accept and ignore it.
 
         Must not raise for an ordinary agent failure — an agent that gives up,
         errors, or runs out of budget returns an AgentResult with `error` set.
@@ -333,21 +337,26 @@ class BaseInstalledAgent(BaseAgent, abc.ABC):
         env: BaseEnvironment,
         timeout: Optional[float] = None,
         on_event: EventHook = None,
+        setup_timeout: Optional[float] = None,
     ) -> AgentResult:
+        """Run the installed agent.
+
+        `setup_timeout` is a DEDICATED budget for the INSTALL step. When set,
+        the install phase gets up to `setup_timeout` seconds and the main run
+        starts a FRESH deadline from `timeout` — so installation time does not
+        eat the agent's working budget. When None, the old behaviour applies:
+        one shared deadline across install + run.
+        """
         try:
             secret_env = self._secret_env()
         except llm.ProviderError as e:
             return AgentResult([], error=str(e), prompt_version=self.PROMPT_VERSION)
 
-        # `timeout` is the TOTAL agent-session budget (standard semantics), shared
-        # across install + run — not a per-command limit. One deadline so the two
-        # phases can't each spend the full budget (2x wall-clock).
-        deadline = (time.time() + timeout) if timeout else None
-
-        def _remaining() -> Optional[float]:
-            return max(0.0, deadline - time.time()) if deadline else None
-
         # 1. Install the agent into the container (needs network egress).
+        #    When setup_timeout is given, use it as a dedicated cap; when absent,
+        #    fall back to the shared timeout so the old single-deadline path works.
+        install_timeout = setup_timeout if setup_timeout is not None else timeout
+
         if on_event:
             on_event(
                 {
@@ -357,7 +366,7 @@ class BaseInstalledAgent(BaseAgent, abc.ABC):
                     "status": PhaseStatus.RUNNING.value,
                 }
             )
-        install = env.exec(self.INSTALL, phase="agent", timeout=_remaining())
+        install = env.exec(self.INSTALL, phase="agent", timeout=install_timeout)
         steps = [install]
         if install.exit_code != 0:
             return AgentResult(
@@ -370,23 +379,26 @@ class BaseInstalledAgent(BaseAgent, abc.ABC):
                 prompt_version=self.PROMPT_VERSION,
             )
 
-        # Install ate into the shared budget; bail if nothing's left rather than
-        # calling exec with timeout<=0 (which would insta-timeout the run).
-        remaining = _remaining()
-        if remaining is not None and remaining <= 0:
-            return AgentResult(
-                steps,
-                error=f"Agent session timed out after {timeout}s (during install).",
-                prompt_version=self.PROMPT_VERSION,
-            )
-
         # Read the version now, between install and run: the binary exists, and
         # doing it here means a run that later fails still records what failed.
         agent_version = self._capture_version(env)
 
-        # 2. Run headless. The key goes in via env, not the command. Installed
-        #    agents may exit non-zero even on success (a cap hit, a noisy tool) —
-        #    we don't gate on their exit code; the verifier is the source of truth.
+        # 2. Run headless. The main `timeout` clock starts FRESH here when
+        #    setup_timeout was supplied (install already had its own window).
+        #    When setup_timeout is None we keep the shared-deadline path for
+        #    backward compatibility.
+        if setup_timeout is not None:
+            # Fresh deadline — install time is not deducted from the work budget.
+            deadline = (time.time() + timeout) if timeout else None
+        else:
+            # Legacy path: one shared deadline from the original call entry.
+            deadline = (time.time() + timeout) if timeout else None
+
+        def _remaining() -> Optional[float]:
+            return max(0.0, deadline - time.time()) if deadline else None
+
+        remaining = _remaining()
+
         cmd = self._run_command(instruction, env)
         masked = self._masked_command()
         if on_event:

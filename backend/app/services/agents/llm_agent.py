@@ -121,6 +121,7 @@ class LLMAgent(BaseAgent):
         env: BaseEnvironment,
         timeout: Optional[float] = None,
         on_event: EventHook = None,
+        setup_timeout: Optional[float] = None,  # unused — no INSTALL step
     ) -> AgentResult:
         # instruction.md is task-author content, not trusted input — cap it
         # before it ever reaches the prompt (cost + prompt-injection surface).
