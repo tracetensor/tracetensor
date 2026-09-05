@@ -106,6 +106,33 @@ class EnvironmentConfig(BaseModel):
         return v
 
 
+class StepConfig(BaseModel):
+    """One step in a multi-step task.
+
+    Each step runs the agent against its own instruction and grades it with its
+    own verifier. The shared sandbox environment (container) is reused across
+    steps so state persists — the agent's changes in step 1 are visible in step 2.
+    The final trial reward is the mean of all step rewards.
+
+    Layout convention (auto-detected by parse_task_toml):
+        steps/
+          01-first/
+            instruction.md
+            tests/
+              test.sh
+          02-second/
+            instruction.md
+            tests/
+              test.sh
+    """
+
+    # Relative to the step directory.
+    instruction_file: str = "instruction.md"
+    tests_dir: str = "tests"
+    agent_timeout_sec: float = 120.0
+    verifier_timeout_sec: float = 120.0
+
+
 class TaskConfig(BaseModel):
     """The full Patient Chart parsed from task.toml."""
 
@@ -123,6 +150,10 @@ class TaskConfig(BaseModel):
 
     # Paths the agent produces that a SEPARATE verifier needs (copied agent→verifier).
     artifacts: list[str] = Field(default_factory=list)
+
+    # Multi-step: when non-empty, the trial loops over steps using the shared
+    # sandbox. Single-step tasks leave this empty.
+    steps: list[StepConfig] = Field(default_factory=list)
 
     # Anything else under [metadata] we keep verbatim.
     metadata: dict = Field(default_factory=dict)
