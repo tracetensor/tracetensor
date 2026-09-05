@@ -94,6 +94,18 @@ def run(
         max=100.0,
         help="Multiply agent + verifier timeouts (e.g. 2.0 for harder tasks, 0.5 for quick smoke tests).",
     ),
+    agent_timeout: Optional[float] = typer.Option(
+        None,
+        "--agent-timeout",
+        min=1.0,
+        help="Override agent timeout in seconds (takes precedence over task.toml + --timeout-scale).",
+    ),
+    verifier_timeout: Optional[float] = typer.Option(
+        None,
+        "--verifier-timeout",
+        min=1.0,
+        help="Override verifier timeout in seconds (takes precedence over task.toml + --timeout-scale).",
+    ),
     json_out: bool = typer.Option(False, "--json", help="Machine-readable JSON (for CI/scripts)."),
     verbose: bool = typer.Option(
         False, "--verbose", help="Emit structured JSON logs to stdout (for debugging)."
@@ -140,6 +152,12 @@ def run(
         agent_to *= timeout_scale
         verifier_to *= timeout_scale
 
+    # Direct timeout overrides take precedence over task.toml values and --timeout-scale.
+    if agent_timeout is not None:
+        agent_to = agent_timeout
+    if verifier_timeout is not None:
+        verifier_to = verifier_timeout
+
     try:
         resolve_agent(agent, model, settings)
     except AgentConfigError as e:
@@ -177,7 +195,9 @@ def run(
             ("task", name),
             ("agent", agent + (f" · {model}" if model else "")),
             ("trials", f"{n_trials}  (×{conc} parallel)"),
-            ("timeouts", f"agent {int(agent_to)}s · verifier {int(verifier_to)}s"),
+            ("timeouts", f"agent {int(agent_to)}s · verifier {int(verifier_to)}s"
+                     + (" (--agent-timeout)" if agent_timeout is not None else "")
+                     + (" (--verifier-timeout)" if verifier_timeout is not None else "")),
             ("where", server if server else f"local · {resolved_backend}"),
         ]
         ui.console.print()

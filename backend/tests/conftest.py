@@ -66,6 +66,7 @@ _KEY_GATED = {"test_phase2_e2e.py", "test_phase2_api_e2e.py"}
 # through and took collection down — twice, both times from files added
 # mid-session by another editor.
 _PYTEST_NATIVE = {
+    "test_agent_hardening.py",
     "test_agent_instrumentation.py",
     "test_api_contract.py",
     "test_bash_agent_prompt.py",
