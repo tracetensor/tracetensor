@@ -29,6 +29,11 @@ if TYPE_CHECKING:  # import-cycle-free typing for the factory seams
     from app.services.agents.base import BaseAgent
     from app.services.environment import BaseEnvironment
 
+
+def _execution_record(backend: str, env: "BaseEnvironment") -> dict:
+    """Merge backend id with provider-specific sandbox/container metadata."""
+    return {"backend": backend, **env.execution_metadata()}
+
 log = get_logger("tracetensor.trial")
 
 # on_event(evt: dict) -> None. Optional live-progress hook. run_trial calls it at
@@ -153,8 +158,6 @@ def prebuild(task_dir: Path, backend: str = "docker") -> None:
     real error surfaces per-trial (where it's recorded) instead of failing the
     whole job here.
     """
-    if backend != "docker":
-        return
     try:
         from app.services.task_parser import parse_task_toml
 
@@ -166,6 +169,12 @@ def prebuild(task_dir: Path, backend: str = "docker") -> None:
             docker_image=e.docker_image,
             build_timeout=e.build_timeout_sec,
             platform=resolve_docker_platform(e.platform),
+            # The resource shape matters to backends that bake it into the
+            # prebuilt artifact (Daytona snapshots do). Prebuilding with the
+            # defaults would warm something the trials then can't use.
+            cpus=e.cpus,
+            memory_mb=e.memory_mb,
+            storage_mb=e.storage_mb,
         ).build()
         # The isolated verifier runs from tests/Dockerfile — warm that image too.
         if cfg.verifier.environment_mode == "separate":
@@ -237,6 +246,24 @@ def _run_trial_once(
             status=TrialStatus.ERROR.value, error=detail, duration_s=time.time() - start
         )
 
+    # Refuse a task this backend cannot honour before anything is provisioned.
+    # The same check runs in the CLI; repeated here because the API and worker
+    # paths reach this function directly, and because the alternative is failing
+    # mid-trial with a sandbox already paid for.
+    from app.services.backend_capabilities import unsupported_features
+
+    blockers = unsupported_features(backend, cfg)
+    if blockers:
+        detail = f"Task is not runnable on the {backend} backend: " + " ".join(blockers)
+        _phase(on_event, "setup", PhaseStatus.ERROR, detail=detail[:200])
+        log.error(
+            "trial_error",
+            extra={"task": task_label, "phase": "capabilities", "error": detail[:200]},
+        )
+        return TrialOutcome(
+            status=TrialStatus.ERROR.value, error=detail, duration_s=time.time() - start
+        )
+
     e = cfg.environment
     baseline_net = e.network_mode
     build_timeout = e.build_timeout_sec
@@ -255,6 +282,8 @@ def _run_trial_once(
         platform=resolved_platform,
     )
     agent_net = cfg.agent.network_mode
+    agent_allowed_hosts = cfg.agent.allowed_hosts
+    agent_max_steps = cfg.agent.max_steps
     verifier_net = cfg.verifier.network_mode
     separate_verifier = cfg.verifier.environment_mode == "separate"
     artifacts = list(cfg.artifacts)
@@ -289,9 +318,19 @@ def _run_trial_once(
     verifier_env_obj = None
     try:
         # 1. Agent works. Apply the agent-phase network override (or baseline).
-        env.set_network(agent_net or baseline_net)
+        try:
+            env.set_network(agent_net or baseline_net, allowed_hosts=agent_allowed_hosts or None)
+        except RuntimeError as e:
+            detail = str(e)
+            _phase(on_event, "agent", PhaseStatus.ERROR, detail=detail[:200])
+            log.error("trial_error", extra={"task": task_label, "phase": "agent_network", "error": detail[:200]})
+            return TrialOutcome(
+                status=TrialStatus.ERROR.value,
+                error=f"Agent network switch failed: {detail}",
+                duration_s=time.time() - start,
+            )
         _phase(on_event, "agent", PhaseStatus.RUNNING)
-        agent = agent_factory(agent_name, task_dir, model=model)
+        agent = agent_factory(agent_name, task_dir, model=model, max_steps=agent_max_steps)
         agent_result = agent.run(instruction, env, timeout=agent_timeout, on_event=on_event)
         steps.extend(s.to_step() for s in agent_result.steps)
         _phase(on_event, "agent", PhaseStatus.DONE, agent_error=agent_result.error)
@@ -370,7 +409,10 @@ def _run_trial_once(
                 copy_tests=False,
             )  # test.sh is baked into the image
         else:
-            env.set_network(verifier_net or baseline_net)  # verifier-phase network
+            try:
+                env.set_network(verifier_net or baseline_net)
+            except RuntimeError as e:
+                _warn(on_event, warnings, f"verifier network switch failed: {e}")
             verdict = run_verifier(
                 env,
                 tests_dir,
@@ -407,6 +449,7 @@ def _run_trial_once(
             "agent": agent_name,
             "model": model,
             "steps": steps,
+            "execution": _execution_record(backend, env),
             "agent_error": agent_result.error,
             "warnings": warnings,
             # LLM spend/latency instrumentation — see app.services.llm.LLMCallResult.
@@ -414,6 +457,9 @@ def _run_trial_once(
             "llm_calls": llm_calls,
             "llm_usage_summary": _summarize_llm_usage(llm_calls),
             "prompt_version": getattr(agent_result, "prompt_version", None),
+            # The agent's own version, so two scores taken weeks apart are
+            # comparable — or are visibly not.
+            "agent_version": getattr(agent_result, "agent_version", None),
             "guardrail_flags": getattr(agent_result, "guardrail_flags", None) or [],
             # An external agent's own trajectory (e.g. Mini-SWE's), if it produced
             # one — its full internal reasoning, preserved for inspection/export.
@@ -454,7 +500,12 @@ def _run_trial_once(
         )
         return TrialOutcome(
             status=TrialStatus.ERROR.value,
-            trajectory={"agent": agent_name, "steps": steps, "warnings": warnings},
+            trajectory={
+                "agent": agent_name,
+                "steps": steps,
+                "warnings": warnings,
+                "execution": _execution_record(backend, env),
+            },
             error=f"Trial failed: {e}",
             duration_s=time.time() - start,
             warnings=warnings,

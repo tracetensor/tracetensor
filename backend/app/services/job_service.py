@@ -81,6 +81,7 @@ async def create_job(
     model: Optional[str],
     n_trials: int,
     concurrency: int,
+    backend: str = "docker",
     idempotency_key: Optional[str] = None,
 ) -> CreatedJob:
     """Queue one task for N trials.
@@ -102,6 +103,8 @@ async def create_job(
 
     resolved_agent, resolved_model = resolve_agent(agent, model, settings)
 
+    from app.services.backend_catalog import normalize_backend
+
     job = Job(
         id=uuid.uuid4(),
         task_id=task_id,
@@ -109,6 +112,7 @@ async def create_job(
         model=resolved_model,
         n_trials=n_trials,
         concurrency=concurrency,
+        backend=normalize_backend(backend),
         status=JobStatus.QUEUED.value,
         idempotency_key=idempotency_key,
     )
@@ -141,6 +145,7 @@ async def create_dataset_run(
     model: Optional[str],
     n_trials: int,
     concurrency: int,
+    backend: str = "docker",
     idempotency_key: Optional[str] = None,
 ) -> CreatedRun:
     """Queue every ready task in a dataset against one agent+model.
@@ -160,6 +165,9 @@ async def create_dataset_run(
         raise NotFound("Dataset not found.")
 
     resolved_agent, resolved_model = resolve_agent(agent, model, settings)
+    from app.services.backend_catalog import normalize_backend
+
+    resolved_backend = normalize_backend(backend)
 
     # Manifest order matters (it's the leaderboard's column order), so index the
     # rows and walk the manifest rather than using the query's ordering.
@@ -177,6 +185,7 @@ async def create_dataset_run(
         model=resolved_model,
         n_trials=n_trials,
         concurrency=concurrency,
+        backend=resolved_backend,
         status=JobStatus.RUNNING.value,
         idempotency_key=idempotency_key,
     )
@@ -201,6 +210,7 @@ async def create_dataset_run(
                 model=resolved_model,
                 n_trials=n_trials,
                 concurrency=concurrency,
+                backend=resolved_backend,
                 status=JobStatus.QUEUED.value,
             )
         )

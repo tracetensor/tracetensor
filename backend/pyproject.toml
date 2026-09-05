@@ -78,7 +78,16 @@ sigterm = true
 # The LLM provider calls and the Docker exec plumbing are exercised by the
 # key-gated / Docker e2e suites, not the deterministic runner — excluding them
 # here keeps the tracked number honest about what the fast suite actually covers.
-omit = ["app/__init__.py", "migrations/*"]
+omit = [
+    "app/__init__.py",
+    "migrations/*",
+    # A payload, not backend code: it is shipped into the sandbox and executed by
+    # the CONTAINER's Python, so host-side coverage structurally cannot observe
+    # it however well it is tested. Counting it would read as 0% forever and drag
+    # the tracked number away from what the backend's own tests actually cover.
+    # Its behaviour is covered by GraphFactoryShapeTests plus the real runs.
+    "app/services/agents/_langgraph_runner.py",
+]
 
 [tool.coverage.report]
 show_missing = true

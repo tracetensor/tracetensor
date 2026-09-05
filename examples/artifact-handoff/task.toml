@@ -1,0 +1,39 @@
+schema_version = "1.3"
+
+# The grader only ever sees what is listed here (plus /logs/artifacts), so this
+# is what gets moved from the agent's sandbox to the grading sandbox.
+# Root-level on purpose: in TOML a key written after a [table] header belongs to
+# that table, so this must sit above the first one to be read as `artifacts`.
+artifacts = ["/app/out"]
+
+[task]
+name = "tracetensor/artifact-handoff"
+description = "Write an artifact that an isolated grader reads from a separate sandbox."
+authors = [{ name = "Rahul" }]
+keywords = ["sandbox", "isolation", "verifier", "network"]
+
+[metadata]
+difficulty_explanation = """
+Trivial for the agent, deliberately. This task exercises the *backend*, not the
+agent: it forces a network-policy switch on a running sandbox and an artifact
+handoff into a separate grading sandbox. A backend that cannot do both fails it.
+"""
+category = "infrastructure"
+
+[verifier]
+timeout_sec = 90.0
+# A fresh grading sandbox built from tests/Dockerfile that the agent never
+# touched — tampering with the agent's own copy of test.sh cannot affect it.
+environment_mode = "separate"
+network_mode = "no-network"
+
+[agent]
+timeout_sec = 300.0
+# Left at the [environment] baseline deliberately. An override here would force
+# a mid-trial network switch, which is an account-level permission on some cloud
+# backends — this task is about the artifact handoff, and pinning it to one
+# backend would defeat that.
+
+[environment]
+network_mode = "no-network"
+build_timeout_sec = 600.0

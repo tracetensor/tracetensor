@@ -35,7 +35,11 @@ def factories(env=None, agent=None):
         env.kwargs = kw
         return env
 
-    def agent_factory(name, task_dir, model=None):
+    def agent_factory(name, task_dir, model=None, **kw):
+        # The seam is typed Callable[..., BaseAgent] — variadic on purpose, so the
+        # runner can thread new per-task settings (max_steps, …) without every
+        # double having to be rewritten. Recorded so tests can assert on them.
+        agent.factory_kwargs = kw
         return agent
 
     return env_factory, agent_factory, made

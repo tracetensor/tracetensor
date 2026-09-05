@@ -1,0 +1,31 @@
+schema_version = "1.3"
+
+[task]
+name = "tracetensor/langgraph-report"
+description = "Read a source folder and synthesise a formatted research report."
+authors = [{ name = "Rahul" }]
+keywords = ["langgraph", "deep-agent", "research", "agentic"]
+
+[metadata]
+difficulty_explanation = """
+Multi-step but not tricky: discover the sources, pick the right one, synthesise,
+and write a file in a required format. Exercises an agent's file tools and its
+instruction-following, which is what a graph-based agent is actually for.
+"""
+category = "agentic"
+
+[verifier]
+timeout_sec = 90.0
+
+[agent]
+# Generous: the LangGraph adapter pip-installs the graph runtime inside the
+# sandbox before the agent's first turn, and that install shares this budget.
+timeout_sec = 900.0
+
+[environment]
+# The agent installs packages and calls the model API from inside the sandbox,
+# so it needs egress. Declared once at the environment level with no phase
+# overrides — Daytona sandboxes cannot switch network mode mid-trial.
+network_mode = "public"
+build_timeout_sec = 900.0
+memory_mb = 2048

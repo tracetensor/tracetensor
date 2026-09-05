@@ -29,7 +29,6 @@ from app.routers._views import _job_summary, _job_view
 from app.schemas.common import ERROR_RESPONSES, SSE_EVENT_REF, Page
 from app.schemas.events import StreamEventEnvelope
 from app.schemas.examine import (
-    BackendEntry,
     ExamineRequest,
     JobSummary,
     JobView,
@@ -64,19 +63,17 @@ async def list_providers() -> ProvidersView:
     """Providers + their model catalog for the UI dropdowns.
 
     Each provider is available only if its API key is set (env or backend/.env).
-    Docker is the only backend. `installed_agents` carries honest status labels
-    (verified / gated / unsupported) matching README.
+    Backends list local + cloud sandboxes with honest `ready` flags from preflight.
     """
     from app.core.config import settings
     from app.services import agents as agent_svc
     from app.services import llm
+    from app.services.backend_catalog import list_backend_entries
 
     return ProvidersView(
         agents=llm.catalog(settings.available_providers()),
         installed_agents=agent_svc.agent_status_catalog(),
-        backends=[
-            BackendEntry(id="docker", label="Docker · real container", available=True),
-        ],
+        backends=list_backend_entries(),
     )
 
 
@@ -101,6 +98,15 @@ async def start_examination(
     # app.services.job_service.create_job. This handler validates the request
     # shape, calls the service, and maps its errors onto status codes.
     concurrency = validate_trial_params(req.n_trials, req.concurrency, ceiling=req.n_trials)
+    from app.services.backend_catalog import backend_not_ready_message, normalize_backend
+
+    try:
+        normalize_backend(req.backend)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    block = backend_not_ready_message(req.backend)
+    if block:
+        raise HTTPException(status_code=400, detail=block)
     try:
         created = await job_service.create_job(
             db,
@@ -109,6 +115,7 @@ async def start_examination(
             model=req.model,
             n_trials=req.n_trials,
             concurrency=concurrency,
+            backend=req.backend,
             idempotency_key=request.headers.get("Idempotency-Key"),
         )
     except job_service.NotFound as e:

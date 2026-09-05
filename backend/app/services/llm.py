@@ -100,6 +100,10 @@ class LLMCallResult:
     output_tokens: Optional[int] = None
     latency_ms: Optional[float] = None
     cost_usd: Optional[float] = None
+    # True when the response had thinking blocks but the text block was empty —
+    # the model thought but produced no command. The agent loop can retry with a
+    # prompt rather than silently treating this as DONE.
+    thinking_only: bool = False
 
 
 class ProviderError(RuntimeError):
@@ -169,6 +173,11 @@ def _call_anthropic(model: str, system: str, user: str, max_tokens: int) -> LLMC
     )
     latency_ms = (time.monotonic() - t0) * 1000
     text = "".join(b.text for b in msg.content if b.type == "text").strip()
+    # Detect thinking-only response: model spent tokens thinking but emitted no
+    # command text. The agent loop uses thinking_only=True to retry with an
+    # explicit "now output ONE bash command" nudge instead of silently breaking.
+    has_thinking = any(getattr(b, "type", "") == "thinking" for b in msg.content)
+    thinking_only = not text and has_thinking
     in_tok = getattr(msg.usage, "input_tokens", None)
     out_tok = getattr(msg.usage, "output_tokens", None)
     return LLMCallResult(
@@ -179,6 +188,7 @@ def _call_anthropic(model: str, system: str, user: str, max_tokens: int) -> LLMC
         output_tokens=out_tok,
         latency_ms=latency_ms,
         cost_usd=None,  # raw API reports no dollar cost — see the note above
+        thinking_only=thinking_only,
     )
 
 

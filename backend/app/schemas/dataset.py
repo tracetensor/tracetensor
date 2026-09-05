@@ -49,6 +49,7 @@ class DatasetRunRequest(BaseModel):
     n_trials: int = 1
     # Global cap across the WHOLE run (all tasks × trials), not per task.
     concurrency: Optional[int] = None
+    backend: str = "docker"
 
 
 class TaskScore(BaseModel):

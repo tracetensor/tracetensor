@@ -1,0 +1,6 @@
+{
+  "dependencies": ["langchain-anthropic"],
+  "graphs": {
+    "researcher": "./agent.py:make_agent"
+  }
+}
