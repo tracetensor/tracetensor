@@ -235,7 +235,8 @@ def _call_openai_compatible(
     usage = getattr(resp, "usage", None)
     in_tok = getattr(usage, "prompt_tokens", None) if usage else None
     out_tok = getattr(usage, "completion_tokens", None) if usage else None
-    if is_reasoning and not text and (out_tok or 0) > 0:
+    thinking_only = bool(is_reasoning and not text and (out_tok or 0) > 0)
+    if thinking_only:
         log.warning(
             "reasoning_empty_content",
             extra={"model": bare, "completion_tokens": out_tok, "provider": provider},
@@ -248,6 +249,7 @@ def _call_openai_compatible(
         output_tokens=out_tok,
         latency_ms=latency_ms,
         cost_usd=None,  # raw API reports no dollar cost — see the note above
+        thinking_only=thinking_only,
     )
 
 
