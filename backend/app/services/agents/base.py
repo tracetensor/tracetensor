@@ -297,6 +297,12 @@ class BaseInstalledAgent(BaseAgent, abc.ABC):
     #: rather than a guess.
     VERSION_COMMAND: Optional[str] = None
 
+    #: Optional fallback tried when VERSION_COMMAND exits non-zero or raises.
+    #: Handles upstreams that rename their version flag between releases
+    #: (e.g. `hermes version` → `hermes --version`). Only one fallback is
+    #: supported; if you need more, override _capture_version() directly.
+    VERSION_COMMAND_FALLBACK: Optional[str] = None
+
     def parse_version(self, stdout: str) -> Optional[str]:
         """Pull a version out of the version command's output.
 
@@ -314,17 +320,46 @@ class BaseInstalledAgent(BaseAgent, abc.ABC):
         return text.splitlines()[0][:80]
 
     def _capture_version(self, env: BaseEnvironment) -> Optional[str]:
-        """Best-effort: a version we couldn't read must never fail the trial."""
+        """Best-effort: a version we couldn't read must never fail the trial.
+
+        Tries VERSION_COMMAND first; if it fails (exception OR non-zero exit)
+        and VERSION_COMMAND_FALLBACK is set, tries that instead. Logs a warning
+        when the primary fails so upstream CLI changes are visible in logs
+        rather than silently producing None.
+        """
         if not self.VERSION_COMMAND:
             return None
-        try:
-            probe = env.exec(self.VERSION_COMMAND, phase="setup", timeout=60)
-        except Exception:
-            log.debug("agent_version_probe_failed", extra={"agent": self.name})
-            return None
-        if probe.exit_code != 0:
-            return None
-        return self.parse_version(probe.stdout)
+
+        def _try(cmd: str) -> Optional[str]:
+            try:
+                probe = env.exec(cmd, phase="setup", timeout=60)
+            except Exception as exc:
+                log.debug(
+                    "agent_version_probe_exception",
+                    extra={"agent": self.name, "cmd": cmd, "error": str(exc)},
+                )
+                return None
+            if probe.exit_code != 0:
+                log.warning(
+                    "agent_version_probe_failed",
+                    extra={
+                        "agent": self.name,
+                        "cmd": cmd,
+                        "exit_code": probe.exit_code,
+                        "stderr": probe.stderr[-200:],
+                    },
+                )
+                return None
+            return self.parse_version(probe.stdout)
+
+        result = _try(self.VERSION_COMMAND)
+        if result is None and self.VERSION_COMMAND_FALLBACK:
+            log.info(
+                "agent_version_probe_fallback",
+                extra={"agent": self.name, "fallback": self.VERSION_COMMAND_FALLBACK},
+            )
+            result = _try(self.VERSION_COMMAND_FALLBACK)
+        return result
 
     def _llm_calls(self, raw: object) -> List[dict]:
         """Roll the trajectory up into our cost records. Default: none."""
@@ -382,6 +417,21 @@ class BaseInstalledAgent(BaseAgent, abc.ABC):
         # Read the version now, between install and run: the binary exists, and
         # doing it here means a run that later fails still records what failed.
         agent_version = self._capture_version(env)
+
+        # Guard against huge instructions being shell-quoted into the run command.
+        # LLMAgent already enforces MAX_INSTRUCTION_CHARS; installed agents pass
+        # the instruction directly to the agent CLI via shlex.quote, so a large
+        # instruction.md is a cost vector (and a silent OSError risk on some agents).
+        if len(instruction) > MAX_INSTRUCTION_CHARS:
+            log.warning(
+                "instruction_truncated",
+                extra={
+                    "agent": self.name,
+                    "original_chars": len(instruction),
+                    "limit": MAX_INSTRUCTION_CHARS,
+                },
+            )
+            instruction = instruction[:MAX_INSTRUCTION_CHARS] + "\n… (truncated)"
 
         # 2. Run headless. The main `timeout` clock starts FRESH here when
         #    setup_timeout was supplied (install already had its own window).
