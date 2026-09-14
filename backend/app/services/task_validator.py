@@ -99,8 +99,11 @@ def validate_task(task_dir: Path) -> ValidationResult:
 
     test_sh = task_dir / "tests" / "test.sh"
     test_bat = task_dir / "tests" / "test.bat"
+    _is_llm_judge = parsed_config and parsed_config.verifier.type == "llm-judge"
     if test_sh.exists() or test_bat.exists():
         result.has_test_script = True
+    elif _is_llm_judge:
+        result.has_test_script = True  # llm-judge tasks score via the model, no test.sh needed
     else:
         result.errors.append("Missing tests/test.sh — there is no way to score the run.")
 

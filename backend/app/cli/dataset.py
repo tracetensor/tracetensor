@@ -198,7 +198,8 @@ def run_dataset(
         print(json.dumps({"tasks": len(dirs), "results": results}, indent=2, default=str))
     else:
         ui.console.print()
-        ui.console.print(ui.summary_panel(passed, len(ran), None, 0.0))
+        mean_r = (sum(r["reward"] for r in ran) / len(ran)) if ran else None
+        ui.console.print(ui.summary_panel(passed, len(ran), mean_r, 0.0))
         ui.console.print()
 
     # ── Baseline regression check ──────────────────────────────────────────────
