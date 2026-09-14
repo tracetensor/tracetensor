@@ -350,8 +350,123 @@ def _run_trial_once(
                 error=f"Agent network switch failed: {detail}",
                 duration_s=time.time() - start,
             )
-        _phase(on_event, "agent", PhaseStatus.RUNNING)
         agent = agent_factory(agent_name, task_dir, model=model, max_steps=agent_max_steps)
+
+        # Multi-step: run agent+verify once per step using the shared sandbox.
+        # Single-step tasks have cfg.steps == [] and take the else branch below.
+        task_steps_cfg = cfg.steps  # StepConfig list; empty = single-step
+        if task_steps_cfg:
+            step_verdicts: list = []
+            all_llm_calls: list = []
+            all_agent_errors: list = []
+            last_agent_result = None
+
+            for step_idx, step_cfg in enumerate(task_steps_cfg):
+                step_label = f"step {step_idx + 1}/{len(task_steps_cfg)}"
+                step_instr_path = task_dir / step_cfg.instruction_file
+                step_instruction = (
+                    step_instr_path.read_text(errors="replace")
+                    if step_instr_path.exists()
+                    else instruction
+                )
+                step_tests_dir = task_dir / step_cfg.tests_dir
+
+                _phase(on_event, "agent", PhaseStatus.RUNNING, step=step_idx + 1, total_steps=len(task_steps_cfg))
+                step_result = agent.run(
+                    step_instruction, env,
+                    timeout=step_cfg.agent_timeout_sec,
+                    on_event=on_event,
+                    setup_timeout=agent_setup_timeout if step_idx == 0 else None,
+                )
+                last_agent_result = step_result
+                steps.extend(s.to_step() for s in step_result.steps)
+                _phase(on_event, "agent", PhaseStatus.DONE, agent_error=step_result.error, step=step_idx + 1)
+                for f in getattr(step_result, "guardrail_flags", None) or []:
+                    _warn(on_event, warnings, f"guardrail [{step_label}]: {f['message']} — `{f['command']}`")
+                all_agent_errors.extend([step_result.error] if step_result.error else [])
+                all_llm_calls.extend(getattr(step_result, "llm_calls", None) or [])
+
+                _phase(on_event, "verify", PhaseStatus.RUNNING, step=step_idx + 1)
+                try:
+                    env.set_network(verifier_net or baseline_net)
+                except RuntimeError as ve:
+                    _warn(on_event, warnings, f"verifier network switch failed [{step_label}]: {ve}")
+                step_verdict = run_verifier(
+                    env,
+                    step_tests_dir,
+                    timeout=step_cfg.verifier_timeout_sec,
+                    pass_threshold=pass_threshold,
+                    verifier_user=verifier_user,
+                )
+                step_verdicts.append(step_verdict)
+                steps.append(step_verdict.step.to_step())
+                if on_event:
+                    vs = step_verdict.step
+                    on_event({
+                        "type": "step",
+                        "phase": "verifier",
+                        "command": vs.command,
+                        "status": PhaseStatus.DONE.value,
+                        "exit_code": vs.exit_code,
+                        "stdout": vs.stdout[-2000:],
+                        "stderr": vs.stderr[-800:],
+                        "step": step_idx + 1,
+                    })
+                _phase(on_event, "verify", PhaseStatus.DONE, step=step_idx + 1)
+                # Switch back to agent network for next step
+                try:
+                    env.set_network(agent_net or baseline_net, allowed_hosts=agent_allowed_hosts or None)
+                except RuntimeError:
+                    pass
+
+            # Aggregate: mean reward, pass only if ALL steps pass.
+            mean_reward = sum(v.reward for v in step_verdicts) / len(step_verdicts)
+            all_passed = all(v.passed for v in step_verdicts)
+            combined_log = "\n---\n".join(v.log or "" for v in step_verdicts)
+            combined_error = "; ".join(all_agent_errors) or None
+            agent_steps = [s for s in (last_agent_result.steps if last_agent_result else []) if getattr(s, "phase", None) == "agent"]
+            _phase(on_event, "score", PhaseStatus.DONE, reward=mean_reward, passed=all_passed)
+            judge_calls = [
+                (v.payload or {}).get("llm_call")
+                for v in step_verdicts
+                if (v.payload or {}).get("llm_call")
+            ]
+            all_llm_calls.extend(judge_calls)
+            trajectory = {
+                "agent": agent_name,
+                "model": model,
+                "steps": steps,
+                "execution": _execution_record(backend, env),
+                "agent_error": combined_error,
+                "warnings": warnings,
+                "llm_calls": all_llm_calls,
+                "llm_usage_summary": _summarize_llm_usage(all_llm_calls),
+                "prompt_version": getattr(last_agent_result, "prompt_version", None),
+                "agent_version": getattr(last_agent_result, "agent_version", None),
+                "guardrail_flags": getattr(last_agent_result, "guardrail_flags", None) or [],
+                "agent_native_trajectory": getattr(last_agent_result, "raw_trajectory", None),
+                "step_rewards": [v.reward for v in step_verdicts],
+            }
+            duration = time.time() - start
+            log.info("trial_end", extra={
+                "task": task_label, "agent": agent_name, "model": model,
+                "passed": all_passed, "reward": mean_reward, "duration_s": round(duration, 2),
+                "n_steps": len(task_steps_cfg), "llm_calls": len(all_llm_calls),
+            })
+            return TrialOutcome(
+                status=TrialStatus.COMPLETED.value,
+                reward=mean_reward,
+                passed=all_passed,
+                trajectory=trajectory,
+                verifier_log=combined_log,
+                reward_payload={"step_rewards": [v.reward for v in step_verdicts]},
+                duration_s=duration,
+                error=combined_error,
+                warnings=warnings,
+            )
+
+        # ── Single-step path (original behaviour, unchanged) ──────────────────
+        _phase(on_event, "agent", PhaseStatus.RUNNING)
         agent_result = agent.run(
             instruction, env, timeout=agent_timeout, on_event=on_event,
             setup_timeout=agent_setup_timeout,
