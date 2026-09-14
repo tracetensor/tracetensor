@@ -115,6 +115,7 @@ class AgentResult:
         prompt_version: Optional[str] = None,
         guardrail_flags: Optional[List[dict]] = None,
         raw_trajectory: Optional[dict] = None,
+        agent_version: Optional[str] = None,
     ):
         self.steps = steps
         self.error = error
@@ -129,6 +130,11 @@ class AgentResult:
         # captured verbatim so its full reasoning/steps are preserved even though
         # they ran inside the agent, not through our exec loop.
         self.raw_trajectory = raw_trajectory
+        # The agent's OWN version, as reported by the agent inside the sandbox.
+        # `prompt_version` identifies our harness; this identifies the thing being
+        # measured. Without it a claude-code score from March and one from today
+        # are not comparable and nothing in the record says so.
+        self.agent_version = agent_version
 
 
 class BaseAgent(abc.ABC):
@@ -209,6 +215,31 @@ def _no_agent_work_error(llm_calls: List[dict], last_text: str) -> str:
     return msg
 
 
+# Exception CLASS NAMES (not message-string matching) that both the anthropic
+# and openai SDKs raise for conditions retrying can actually fix — a busy
+# server, a rate limit, a dropped connection. Both SDKs use these exact same
+# names for the same concepts (verified directly against both packages), so
+# one check covers anthropic/openai/openrouter without importing either SDK
+# here (a hard import would break this module if a provider package isn't
+# installed). Deliberately excludes permanent errors (AuthenticationError,
+# BadRequestError, PermissionDeniedError, NotFoundError, ...) — retrying those
+# never helps and just burns the retry budget on something that can't succeed.
+_TRANSIENT_LLM_ERROR_CLASS_NAMES = frozenset({
+    "OverloadedError",       # anthropic: HTTP 529
+    "RateLimitError",        # anthropic + openai: HTTP 429
+    "InternalServerError",   # anthropic + openai: HTTP 5xx
+    "APIConnectionError",    # anthropic + openai: network drop
+    "APITimeoutError",       # anthropic + openai: request timed out
+})
+
+
+def is_transient_llm_error(exc: BaseException) -> bool:
+    """True if retrying `exc` has a real chance of succeeding (busy server,
+    rate limit, dropped connection) rather than failing the same way again
+    (bad key, malformed request, model doesn't exist)."""
+    return type(exc).__name__ in _TRANSIENT_LLM_ERROR_CLASS_NAMES
+
+
 class BaseInstalledAgent(BaseAgent, abc.ABC):
     """An external coding agent installed and run INSIDE the sandbox (the standard
     BaseInstalledAgent pattern). Every installed agent shares one lifecycle —
@@ -256,6 +287,40 @@ class BaseInstalledAgent(BaseAgent, abc.ABC):
     def _read_trajectory(self, env: BaseEnvironment, run: ExecResult) -> Optional[dict]:
         """The agent's own trajectory — from a file it wrote or its stdout."""
         return None
+
+    #: Shell that prints the installed agent's version, run once after install.
+    #: None means this agent can't report one, and the trial records nothing
+    #: rather than a guess.
+    VERSION_COMMAND: Optional[str] = None
+
+    def parse_version(self, stdout: str) -> Optional[str]:
+        """Pull a version out of the version command's output.
+
+        Agents print wildly different things — "1.0.18 (Claude Code)",
+        "codex-cli 0.4.2", a bare "2.1.0". A dotted number is the common
+        denominator; anything else falls back to the first non-empty line so an
+        unrecognised format is still recorded rather than dropped.
+        """
+        text = (stdout or "").strip()
+        if not text:
+            return None
+        match = re.search(r"\d+\.\d+(?:\.\d+)?(?:[-.\w]*)?", text)
+        if match:
+            return match.group(0)
+        return text.splitlines()[0][:80]
+
+    def _capture_version(self, env: BaseEnvironment) -> Optional[str]:
+        """Best-effort: a version we couldn't read must never fail the trial."""
+        if not self.VERSION_COMMAND:
+            return None
+        try:
+            probe = env.exec(self.VERSION_COMMAND, phase="setup", timeout=60)
+        except Exception:
+            log.debug("agent_version_probe_failed", extra={"agent": self.name})
+            return None
+        if probe.exit_code != 0:
+            return None
+        return self.parse_version(probe.stdout)
 
     def _llm_calls(self, raw: object) -> List[dict]:
         """Roll the trajectory up into our cost records. Default: none."""
@@ -315,6 +380,10 @@ class BaseInstalledAgent(BaseAgent, abc.ABC):
                 prompt_version=self.PROMPT_VERSION,
             )
 
+        # Read the version now, between install and run: the binary exists, and
+        # doing it here means a run that later fails still records what failed.
+        agent_version = self._capture_version(env)
+
         # 2. Run headless. The key goes in via env, not the command. Installed
         #    agents may exit non-zero even on success (a cap hit, a noisy tool) —
         #    we don't gate on their exit code; the verifier is the source of truth.
@@ -353,4 +422,5 @@ class BaseInstalledAgent(BaseAgent, abc.ABC):
             prompt_version=self.PROMPT_VERSION,
             raw_trajectory=raw,
             llm_calls=self._llm_calls(raw),
+            agent_version=agent_version,
         )

@@ -21,6 +21,7 @@ from __future__ import annotations
 import typer
 
 from app.cli import console as ui
+from app.cli.backends import backends_app
 from app.cli.dataset import dataset_app
 from app.cli.run import run as _run
 from app.cli.serve import serve as _serve
@@ -40,6 +41,8 @@ app.command("run")(_run)
 app.command("serve")(_serve)
 # Sub-app: `tracetensor tasks validate …`
 app.add_typer(tasks_app, name="tasks")
+# Sub-app: `tracetensor backends list|preflight …`
+app.add_typer(backends_app, name="backends")
 # Sub-app: `tracetensor dataset run … / pull …`
 app.add_typer(dataset_app, name="dataset")
 # Sub-app: `tracetensor vault list|show|export …`

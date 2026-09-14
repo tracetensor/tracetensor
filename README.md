@@ -150,6 +150,8 @@ tracetensor run <task> -a <agent> -m <model> -n <N>   Run trials + verifier
 tracetensor serve                                     Start the API server
 tracetensor tasks init <dir>                          Scaffold a new task
 tracetensor tasks validate <task>                     Check a task is runnable
+tracetensor tasks pull org/name@latest                Download a Harbor Hub task
+tracetensor dataset pull org/dataset@latest -o tasks/ Fetch a Harbor Hub dataset
 tracetensor dataset run <dir> -a <agent>              Run all tasks in a dataset
 tracetensor vault list                                Browse saved results
 tracetensor vault show <run>                          Inspect a specific run
@@ -210,6 +212,7 @@ tracetensor dataset run examples/test-suite -a oracle
 
 ## Documentation
 
+- [docs/HARBOR_HUB_LOCAL.md](docs/HARBOR_HUB_LOCAL.md) — Pull tasks/datasets from Harbor Hub locally
 - [ARCHITECTURE.md](ARCHITECTURE.md) — System design and internals
 - [SECURITY.md](SECURITY.md) — Security guidelines and threat model
 - [CHANGELOG.md](CHANGELOG.md) — Version history and release notes

@@ -146,5 +146,64 @@ def validate(
         ui.console.print(f"  [bad]•[/] {e}")
     for w in res.warnings:
         ui.console.print(f"  [warn]•[/] {w}")
+    for note in getattr(res, "host_notes", []):
+        ui.console.print(f"  [warn]•[/] {note}")
+    tier = getattr(res, "local_tier", None)
+    if tier:
+        ui.console.print(f"  [muted]local tier:[/] {tier}")
     ui.console.print()
     raise typer.Exit(0 if ready else 1)
+
+
+@tasks_app.command("pull")
+def pull_cmd(
+    package: str = typer.Argument(..., help="Harbor Hub task: org/name or org/name@latest"),
+    out: Path = typer.Option(Path("tasks"), "-o", "--out", help="Output directory."),
+    overwrite: bool = typer.Option(False, "--overwrite", help="Re-download even if cached."),
+    cache: bool = typer.Option(
+        False,
+        "--cache",
+        help="Store under ~/.cache/tracetensor/registry instead of export layout.",
+    ),
+) -> None:
+    """Download a public task from Harbor Hub (direct registry API)."""
+    from app.services.harbor_registry import (
+        HarborRegistryClient,
+        RegistryAuthError,
+        RegistryError,
+        RegistryNotFoundError,
+    )
+    from app.services.task_validator import STATUS_READY, validate_task
+
+    client = HarborRegistryClient()
+    try:
+        result = client.download_task(
+            package,
+            output_dir=out,
+            export=not cache,
+            overwrite=overwrite,
+        )
+    except RegistryNotFoundError as e:
+        ui.error(str(e))
+        raise typer.Exit(2) from e
+    except RegistryAuthError as e:
+        ui.error(f"{e} Set TRACETENSOR_REGISTRY_TOKEN for private packages.")
+        raise typer.Exit(2) from e
+    except RegistryError as e:
+        ui.error(str(e))
+        raise typer.Exit(1) from e
+
+    label = "cached" if result.cached else "downloaded"
+    ui.console.print(f"[ok]✓[/] {label} → [val]{result.path}[/]")
+
+    res = validate_task(result.path)
+    if res.status == STATUS_READY:
+        ui.console.print("[ok]✓ ready[/] — task validates for local run")
+    else:
+        ui.console.print("[warn]⚠[/] downloaded but validation reported issues:")
+        for e in res.errors:
+            ui.console.print(f"  [bad]•[/] {e}")
+        for w in res.warnings:
+            ui.console.print(f"  [warn]•[/] {w}")
+    ui.hint(f"Run: tracetensor run {result.path} -a oracle")
+    raise typer.Exit(0 if res.status == STATUS_READY else 1)

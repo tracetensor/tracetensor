@@ -54,6 +54,28 @@ check(
     "CLI override wins",
     resolve_docker_platform("linux/arm64", override="linux/amd64") == "linux/amd64",
 )
+with patch.dict(os.environ, {"TRACETENSOR_DOCKER_PLATFORM": "host"}, clear=False):
+    check(
+        "host env alias disables auto platform",
+        resolve_docker_platform(None) is None,
+    )
+with patch.dict(os.environ, {"TRACETENSOR_DOCKER_PLATFORM": "none"}, clear=False):
+    check(
+        "none env alias disables auto platform",
+        resolve_docker_platform(None) is None,
+    )
+check(
+    "whitespace CLI override -> None",
+    resolve_docker_platform("linux/arm64", override="  ") is None,
+)
+with patch("app.services.docker_platform.host_is_arm64", return_value=False):
+    with patch.dict(os.environ, {}, clear=True):
+        os.environ.pop("TRACETENSOR_DOCKER_PLATFORM", None)
+        check(
+            "non-arm64 host has no default platform",
+            resolve_docker_platform(None) is None,
+        )
+
 with patch("app.services.docker_platform.host_is_arm64", return_value=True):
     with patch.dict(os.environ, {}, clear=True):
         os.environ.pop("TRACETENSOR_DOCKER_PLATFORM", None)
@@ -78,6 +100,31 @@ check(
     not is_infra_retryable(
         _Outcome(TrialStatus.ERROR.value, error="docker", trajectory={"steps": [{"command": "ls"}]})
     ),
+)
+
+print("\n== infra_retry extra ==")
+check(
+    "manifest platform error is retryable",
+    is_infra_retryable(
+        _Outcome(
+            TrialStatus.ERROR.value,
+            error="docker pull failed: no matching manifest for linux/arm64/v8",
+        )
+    ),
+)
+check(
+    "llm_calls block retry",
+    not is_infra_retryable(
+        _Outcome(
+            TrialStatus.ERROR.value,
+            error="docker manifest",
+            trajectory={"llm_calls": [{"model": "gpt"}]},
+        )
+    ),
+)
+check(
+    "generic error without infra markers not retryable",
+    not is_infra_retryable(_Outcome(TrialStatus.ERROR.value, error="agent gave up")),
 )
 
 print(f"\n== summary: {passed} passed, {failed} failed ==")

@@ -29,21 +29,53 @@ def _parse_jsonl(text: Optional[str]) -> List[dict]:
     return events
 
 
+def _tokens_from_turns(events: List[dict]) -> tuple:
+    """Run-total tokens from the LAST `turn.completed`, or (None, None).
+
+    The usage on a `turn.completed` is cumulative for that turn, not the cost of
+    one API call — an observed run reported input_tokens=3,403,871 (of which
+    3,333,960 cached) in a single event, far beyond any one request's context
+    window. `codex exec` emits one such event per run, so the last one carries
+    the run total; taking the last rather than summing is what keeps a
+    multi-event stream from double-counting a cumulative figure.
+
+    `input_tokens` is already the TOTAL here, with `cached_input_tokens` a
+    subset of it — not a separate bucket to add. An observed run reported
+    input_tokens=3,403,871 against cached=3,333,960 + cache_write=69,707
+    (=3,403,667, the remaining 204 being uncached), so adding the parts would
+    report ~2x the real figure. Anthropic's shape is the opposite — there the
+    cache fields ARE separate and do get summed — which is why the two adapters
+    deliberately differ. `output_tokens` likewise already includes reasoning.
+
+    Dollars stay None — Codex reports no USD and cost.py never estimates one.
+    """
+    last = None
+    for e in events:
+        if isinstance(e, dict) and e.get("type") == "turn.completed":
+            u = e.get("usage")
+            if isinstance(u, dict):
+                last = u
+    if not last:
+        return None, None
+    return (last.get("input_tokens") or None), (last.get("output_tokens") or None)
+
+
 def _llm_calls_from_codex_jsonl(text: Optional[str], model: str) -> List[dict]:
     """Codex `exec --json` prints JSONL events; the turn count is the reliable
-    signal. It emits NO USD cost, and its per-turn `usage` token semantics are
-    ambiguous (possibly cumulative), so we record only the turn count and leave
-    cost/tokens None rather than report a number that might be 2-3x off."""
+    call signal and `turn.completed.usage` carries the run's tokens. It emits NO
+    USD cost, so cost_usd stays None — see cost.py: a figure we computed here
+    would be an estimate, and this platform never publishes one."""
     events = _parse_jsonl(text)
     turns = sum(1 for e in events if e.get("type") == "turn.completed")
     if not turns:
         return []
+    inp, out = _tokens_from_turns(events)
     return [
         {
             "provider": "openai",
             "model": model,
-            "input_tokens": None,
-            "output_tokens": None,
+            "input_tokens": inp,
+            "output_tokens": out,
             "latency_ms": None,
             "cost_usd": None,
             "api_calls": turns,
@@ -61,6 +93,7 @@ class CodexAgent(BaseInstalledAgent):
     """
 
     PROMPT_VERSION = "codex-cli"
+    VERSION_COMMAND = "codex --version"
     INSTALL = (
         "command -v codex >/dev/null 2>&1 || { "
         "(command -v curl >/dev/null 2>&1 || "
@@ -111,12 +144,13 @@ class CodexAgent(BaseInstalledAgent):
         turns = sum(1 for e in events if isinstance(e, dict) and e.get("type") == "turn.completed")
         if not turns:
             return []
+        inp, out = _tokens_from_turns(events)
         return [
             {
                 "provider": "openai",
                 "model": self.model,
-                "input_tokens": None,
-                "output_tokens": None,
+                "input_tokens": inp,
+                "output_tokens": out,
                 "latency_ms": None,
                 "cost_usd": None,
                 "api_calls": turns,

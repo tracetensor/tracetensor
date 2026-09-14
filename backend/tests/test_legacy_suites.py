@@ -106,17 +106,15 @@ def test_docker_suite(suite):
 KEY_GATED_SUITES = ["test_phase2_e2e.py", "test_phase2_api_e2e.py"]
 
 #: pytest-native modules — collected normally, so not run as subprocesses.
-PYTEST_SUITES = [
-    "test_api_contract.py",
-    "test_dataset_service.py",
-    "test_frontend_contract.py",
-    "test_frontend_smoke.py",
-    "test_job_service.py",
-    "test_legacy_suites.py",
-    "test_llm_agent_unit.py",
-    "test_routers_unit.py",
-    "test_trial_runner_unit.py",
-]
+#
+# Read from conftest rather than restated. This was a second copy of the same
+# list, and only conftest's copy actually gates collection: a file added here
+# alone satisfied the accounting check below while pytest still ignored it. That
+# is how eight pytest-native suites came to pass when run by hand and never run
+# in CI at all. One list, one meaning.
+from conftest import _PYTEST_NATIVE  # noqa: E402
+
+PYTEST_SUITES = sorted(_PYTEST_NATIVE - {"conftest.py"})
 
 
 def test_every_suite_is_accounted_for():
