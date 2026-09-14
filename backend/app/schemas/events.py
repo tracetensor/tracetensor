@@ -33,6 +33,7 @@ EventType = Literal[
     "phase",
     "step",
     "thinking",
+    "agent_text",
     "warning",
     "guardrail",
     "trial_started",
@@ -42,6 +43,7 @@ EventType = Literal[
     "run_started",
     "task_progress",
     "run_done",
+    "diagnose",
     "error",
 ]
 
@@ -185,6 +187,20 @@ class RunDoneEvent(BaseModel):
     status: JobStatusLiteral
 
 
+class DiagnoseEvent(BaseModel):
+    """A trial's post-hoc failure analysis finished (docs/DIAGNOSE.md).
+
+    Fires after `trial_done` — diagnosis is a separate pass and must never
+    delay the trial result. `primary` is the top failure class, or null when
+    the analysis found nothing."""
+
+    type: Literal["diagnose"] = "diagnose"
+    trial_num: int
+    primary: Optional[str] = None
+    occurrence_count: int = 0
+    engine: str = "rules"
+
+
 class StreamErrorEvent(BaseModel):
     """The stream itself failed — currently only the deadline. Distinct from a
     job that failed, which is a `job_done` with status `failed`."""
@@ -208,6 +224,7 @@ StreamEvent = Union[
     RunStartedEvent,
     TaskProgressEvent,
     RunDoneEvent,
+    DiagnoseEvent,
     StreamErrorEvent,
 ]
 
@@ -225,6 +242,7 @@ class StreamEventEnvelope(BaseModel):
 
 
 __all__ = [
+    "DiagnoseEvent",
     "EventType",
     "GuardrailEvent",
     "JobDoneEvent",

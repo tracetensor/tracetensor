@@ -36,11 +36,17 @@ class OracleAgent(BaseAgent):
         env: BaseEnvironment,
         timeout: Optional[float] = None,
         on_event: EventHook = None,
+        setup_timeout: Optional[float] = None,  # unused — no INSTALL step
     ) -> AgentResult:
         solve_dir = self.task_dir / "solution"
         if not (solve_dir / "solve.sh").exists():
             return AgentResult(
-                [], error="No solution/solve.sh — this task has no oracle reference."
+                [],
+                error=(
+                    "No solution/solve.sh found. The oracle agent requires a shell script "
+                    "at solution/solve.sh that applies the reference fix "
+                    "(e.g. `cd /app && patch -p1 < /solution/fix.patch`)."
+                ),
             )
 
         env.copy_in(solve_dir, "/solution")

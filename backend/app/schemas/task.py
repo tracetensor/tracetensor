@@ -60,15 +60,23 @@ class AgentConfig(BaseModel):
     """How the patient (agent) is allowed to work."""
 
     timeout_sec: Optional[float] = 120.0
+    # Dedicated budget for the agent install step (e.g. pip install, curl | bash).
+    # Consumed BEFORE the main agent_timeout clock starts, so install time does not
+    # eat into the agent's actual working budget. Only used by BaseInstalledAgent.
+    setup_timeout_sec: float = 360.0
     network_mode: Optional[str] = None  # phase override
     allowed_hosts: list[str] = Field(default_factory=list)
     user: Optional[str] = None
+    max_steps: Optional[int] = None  # per-task step budget for built-in LLM agent
 
 
 class EnvironmentConfig(BaseModel):
     """The examination room the agent works inside."""
 
     build_timeout_sec: float = 600.0
+    # Separate cap for container-start + post-start execs (docker run + mkdir/chmod).
+    # The build phase has its own build_timeout_sec; this guards the start phase.
+    setup_timeout_sec: float = 60.0
     network_mode: str = "public"  # public | no-network | allowlist
     allowed_hosts: list[str] = Field(default_factory=list)
     docker_image: Optional[str] = None
@@ -98,6 +106,33 @@ class EnvironmentConfig(BaseModel):
         return v
 
 
+class StepConfig(BaseModel):
+    """One step in a multi-step task.
+
+    Each step runs the agent against its own instruction and grades it with its
+    own verifier. The shared sandbox environment (container) is reused across
+    steps so state persists — the agent's changes in step 1 are visible in step 2.
+    The final trial reward is the mean of all step rewards.
+
+    Layout convention (auto-detected by parse_task_toml):
+        steps/
+          01-first/
+            instruction.md
+            tests/
+              test.sh
+          02-second/
+            instruction.md
+            tests/
+              test.sh
+    """
+
+    # Relative to the step directory.
+    instruction_file: str = "instruction.md"
+    tests_dir: str = "tests"
+    agent_timeout_sec: float = 120.0
+    verifier_timeout_sec: float = 120.0
+
+
 class TaskConfig(BaseModel):
     """The full Patient Chart parsed from task.toml."""
 
@@ -115,6 +150,10 @@ class TaskConfig(BaseModel):
 
     # Paths the agent produces that a SEPARATE verifier needs (copied agent→verifier).
     artifacts: list[str] = Field(default_factory=list)
+
+    # Multi-step: when non-empty, the trial loops over steps using the shared
+    # sandbox. Single-step tasks leave this empty.
+    steps: list[StepConfig] = Field(default_factory=list)
 
     # Anything else under [metadata] we keep verbatim.
     metadata: dict = Field(default_factory=dict)

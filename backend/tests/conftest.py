@@ -66,13 +66,27 @@ _KEY_GATED = {"test_phase2_e2e.py", "test_phase2_api_e2e.py"}
 # through and took collection down — twice, both times from files added
 # mid-session by another editor.
 _PYTEST_NATIVE = {
+    "test_agent_hardening.py",
+    "test_agent_instrumentation.py",
     "test_api_contract.py",
+    "test_bash_agent_prompt.py",
+    "test_backend_capabilities.py",
+    "test_backend_catalog.py",
     "test_dataset_service.py",
+    "test_daytona_runtime.py",
+    "test_diagnose.py",
+    "test_environment_platform.py",
+    "test_environment_registry.py",
     "test_frontend_contract.py",
     "test_frontend_smoke.py",
+    "test_harbor_integration.py",
+    "test_harbor_registry.py",
     "test_job_service.py",
+    "test_langgraph_agent.py",
     "test_legacy_suites.py",
     "test_llm_agent_unit.py",
+    "test_local_preflight.py",
+    "test_registry_cache.py",
     "test_routers_unit.py",
     "test_trial_runner_unit.py",
     "conftest.py",
@@ -182,7 +196,7 @@ class FakeEnvironment(BaseEnvironment):
     def copy_in(self, src_dir: Path, dest: str) -> None:
         pass
 
-    def set_network(self, mode) -> None:
+    def set_network(self, mode, *, allowed_hosts=()) -> None:
         self.networks.append(mode)
 
     def transfer_from(self, other, paths):
@@ -205,7 +219,7 @@ class FakeAgent:
         self._error = error
         self._llm_calls = llm_calls or []
 
-    def run(self, instruction, env, timeout=None, on_event=None):
+    def run(self, instruction, env, timeout=None, on_event=None, setup_timeout=None):
         from app.services.agents.base import AgentResult
 
         steps = [env.exec(c, phase="agent") for c in self._commands]

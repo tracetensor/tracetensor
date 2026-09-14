@@ -56,6 +56,10 @@ class MiniSweAgent(BaseInstalledAgent):
     cost) is written to a file we then read."""
 
     PROMPT_VERSION = "mini-swe-agent"
+    # The CLI has no --version flag; ask the installed distribution instead.
+    VERSION_COMMAND = (
+        'python -c "import importlib.metadata as m; print(m.version(\'mini-swe-agent\'))"'
+    )
     INSTALL = "pip install --quiet --disable-pip-version-check mini-swe-agent"
     TRAJ_PATH = "/logs/agent/mini.traj.json"
 
@@ -74,8 +78,11 @@ class MiniSweAgent(BaseInstalledAgent):
         return {"MSWEA_CONFIGURED": "true", "MSWEA_SILENT_STARTUP": "true"}
 
     def _run_command(self, instruction: str, env: BaseEnvironment) -> str:
-
+        # pip installs the `mini` console script to ~/.local/bin, which is not on
+        # PATH for the non-root agent user — a bare `mini` fails with exit 127.
+        # Prepend the user bin dir so the freshly-installed CLI is always found.
         return (
+            f'export PATH="$HOME/.local/bin:$PATH"; '
             f"mini -y -m {shlex.quote(self.model)} -l {self.COST_LIMIT_USD} "
             f"-t {shlex.quote(instruction)} -o {self.TRAJ_PATH}"
         )

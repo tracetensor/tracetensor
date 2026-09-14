@@ -22,6 +22,7 @@ from typing import Optional
 import typer
 
 from app.cli import console as ui
+from app.schemas.registry import looks_like_package_ref
 
 dataset_app = typer.Typer(
     help="Run or fetch a dataset (a directory of tasks).", no_args_is_help=True
@@ -41,12 +42,23 @@ def run_dataset(
     agent: str = typer.Option("mini-swe", "-a", "--agent", help="Agent to run on every task."),
     model: Optional[str] = typer.Option(None, "-m", "--model", help="Model id."),
     backend: str = typer.Option("docker", "--backend", help="Execution backend."),
-    timeout: float = typer.Option(1800.0, "--timeout", help="Per-task agent/verifier timeout (s)."),
+    timeout: float = typer.Option(1800.0, "--timeout", help="Per-task agent/verifier timeout (s) — used when task.toml has no [agent].timeout_sec."),
+    timeout_scale: float = typer.Option(
+        1.0,
+        "--timeout-scale",
+        min=0.1,
+        max=100.0,
+        help="Multiply per-task timeouts from task.toml (e.g. 2.0 for harder tasks).",
+    ),
     json_out: bool = typer.Option(False, "--json", help="Machine-readable output."),
 ) -> None:
     """Run one agent across every task in a dataset and grade each trial."""
+    from app.cli.backends import ensure_backend_ready
+    from app.services.task_parser import parse_task_toml
     from app.services.trial_hints import enrich_trial_result, failure_hint_from_result
     from app.services.trial_runner import prebuild, run_trial
+
+    resolved_backend = ensure_backend_ready(backend)
 
     if not path.exists():
         ui.error(f"No such path: {path}")
@@ -61,7 +73,11 @@ def run_dataset(
         ui.console.print(
             ui.kv_panel(
                 "dataset run",
-                [("tasks", str(len(dirs))), ("agent", agent + (f" · {model}" if model else ""))],
+                [
+                    ("tasks", str(len(dirs))),
+                    ("agent", agent + (f" · {model}" if model else "")),
+                    ("backend", resolved_backend),
+                ],
             )
         )
 
@@ -69,17 +85,31 @@ def run_dataset(
     for d in dirs:
         ipath = d / "instruction.md"
         instruction = ipath.read_text(errors="replace") if ipath.exists() else ""
+        # Per-task timeouts: prefer task.toml values (scaled), fall back to --timeout.
+        task_agent_to = timeout
+        task_verifier_to = timeout
+        tpath = d / "task.toml"
+        if tpath.exists():
+            try:
+                tcfg = parse_task_toml(tpath.read_bytes(), d)
+                task_agent_to = (tcfg.agent.timeout_sec or timeout) * timeout_scale
+                task_verifier_to = (tcfg.verifier.timeout_sec or timeout) * timeout_scale
+            except Exception:
+                pass  # parse errors surface properly inside run_trial
+        elif timeout_scale != 1.0:
+            task_agent_to = timeout * timeout_scale
+            task_verifier_to = timeout * timeout_scale
         t0 = time.time()
         try:
-            prebuild(d, backend)
+            prebuild(d, resolved_backend)
             out = run_trial(
                 task_dir=d,
                 instruction=instruction,
                 agent_name=agent,
                 model=model,
-                backend=backend,
-                agent_timeout=timeout,
-                verifier_timeout=timeout,
+                backend=resolved_backend,
+                agent_timeout=task_agent_to,
+                verifier_timeout=task_verifier_to,
             )
         except Exception as e:  # one task never aborts the dataset
             results.append({"task": d.name, "error": str(e)[:200]})
@@ -135,10 +165,36 @@ def pull_dataset(
     ),
     out: Path = typer.Option(Path("tasks"), "-o", "--out", help="Where to write task dirs."),
 ) -> None:
-    """Fetch a dataset into local task directories (local / git / swebench)."""
+    """Fetch a dataset into local task directories (local / git / swebench / Harbor Hub)."""
     import shutil
 
     out.mkdir(parents=True, exist_ok=True)
+
+    # 0) Harbor Hub package dataset (org/name@tag).
+    if looks_like_package_ref(source):
+        from app.services.harbor_registry import (
+            HarborRegistryClient,
+            RegistryAuthError,
+            RegistryError,
+            RegistryNotFoundError,
+        )
+
+        client = HarborRegistryClient()
+        try:
+            result = client.download_dataset(source, output_dir=out, overwrite=False)
+        except RegistryNotFoundError as e:
+            ui.error(str(e))
+            raise typer.Exit(2) from e
+        except RegistryAuthError as e:
+            ui.error(f"{e} Set TRACETENSOR_REGISTRY_TOKEN for private packages.")
+            raise typer.Exit(2) from e
+        except RegistryError as e:
+            ui.error(str(e))
+            raise typer.Exit(1) from e
+        ui.console.print(
+            f"[ok]✓[/] pulled {len(result.paths)} task(s) → {result.dataset_dir}"
+        )
+        raise typer.Exit(0)
 
     # 1) SWE-Bench Verified via the importer (needs the .venv-swebench toolenv).
     if source == "swebench" or source.startswith("swebench:"):

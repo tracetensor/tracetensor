@@ -35,6 +35,14 @@ class ValidationResult:
     has_docker_image: bool = False
     has_test_script: bool = False
     has_solution: bool = False
+    local_tier: str | None = None
+    # Advisories about THIS machine (arm64 emulation, Docker memory, heavy image),
+    # kept separate from `warnings`. A warning is a property of the task and must
+    # read the same everywhere; a host note is a property of where you happen to
+    # be standing. Merging them meant the identical task validated differently on
+    # an arm64 laptop and an x86 CI box — and got a different stored warning set
+    # depending on which machine registered it.
+    host_notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -42,6 +50,7 @@ class ValidationResult:
             "status": self.status,
             "errors": self.errors,
             "warnings": self.warnings,
+            "host_notes": self.host_notes,
             "health_checks": {
                 "has_instruction": self.has_instruction,
                 "has_task_toml": self.has_task_toml,
@@ -50,6 +59,7 @@ class ValidationResult:
                 "has_test_script": self.has_test_script,
                 "has_solution": self.has_solution,
             },
+            "local_tier": self.local_tier,
         }
 
 
@@ -180,6 +190,14 @@ def validate_task(task_dir: Path) -> ValidationResult:
     result.is_valid = len(result.errors) == 0
     if result.is_valid:
         result.status = STATUS_READY
+    if parsed_config:
+        from app.services.local_preflight import assess_local_run
+
+        tier, preflight = assess_local_run(task_dir, parsed_config)
+        result.local_tier = tier.value
+        for msg in preflight:
+            if msg not in result.host_notes:
+                result.host_notes.append(msg)
     return result
 
 

@@ -11,6 +11,7 @@ Returned TrialOutcome is what the router persists to the `trials` table.
 
 from __future__ import annotations
 
+import concurrent.futures as _cf
 import logging
 import time
 from dataclasses import dataclass, field
@@ -28,6 +29,11 @@ from app.services.verifier import run_verifier
 if TYPE_CHECKING:  # import-cycle-free typing for the factory seams
     from app.services.agents.base import BaseAgent
     from app.services.environment import BaseEnvironment
+
+
+def _execution_record(backend: str, env: "BaseEnvironment") -> dict:
+    """Merge backend id with provider-specific sandbox/container metadata."""
+    return {"backend": backend, **env.execution_metadata()}
 
 log = get_logger("tracetensor.trial")
 
@@ -153,8 +159,6 @@ def prebuild(task_dir: Path, backend: str = "docker") -> None:
     real error surfaces per-trial (where it's recorded) instead of failing the
     whole job here.
     """
-    if backend != "docker":
-        return
     try:
         from app.services.task_parser import parse_task_toml
 
@@ -166,6 +170,12 @@ def prebuild(task_dir: Path, backend: str = "docker") -> None:
             docker_image=e.docker_image,
             build_timeout=e.build_timeout_sec,
             platform=resolve_docker_platform(e.platform),
+            # The resource shape matters to backends that bake it into the
+            # prebuilt artifact (Daytona snapshots do). Prebuilding with the
+            # defaults would warm something the trials then can't use.
+            cpus=e.cpus,
+            memory_mb=e.memory_mb,
+            storage_mb=e.storage_mb,
         ).build()
         # The isolated verifier runs from tests/Dockerfile — warm that image too.
         if cfg.verifier.environment_mode == "separate":
@@ -237,6 +247,24 @@ def _run_trial_once(
             status=TrialStatus.ERROR.value, error=detail, duration_s=time.time() - start
         )
 
+    # Refuse a task this backend cannot honour before anything is provisioned.
+    # The same check runs in the CLI; repeated here because the API and worker
+    # paths reach this function directly, and because the alternative is failing
+    # mid-trial with a sandbox already paid for.
+    from app.services.backend_capabilities import unsupported_features
+
+    blockers = unsupported_features(backend, cfg)
+    if blockers:
+        detail = f"Task is not runnable on the {backend} backend: " + " ".join(blockers)
+        _phase(on_event, "setup", PhaseStatus.ERROR, detail=detail[:200])
+        log.error(
+            "trial_error",
+            extra={"task": task_label, "phase": "capabilities", "error": detail[:200]},
+        )
+        return TrialOutcome(
+            status=TrialStatus.ERROR.value, error=detail, duration_s=time.time() - start
+        )
+
     e = cfg.environment
     baseline_net = e.network_mode
     build_timeout = e.build_timeout_sec
@@ -255,6 +283,9 @@ def _run_trial_once(
         platform=resolved_platform,
     )
     agent_net = cfg.agent.network_mode
+    agent_allowed_hosts = cfg.agent.allowed_hosts
+    agent_max_steps = cfg.agent.max_steps
+    agent_setup_timeout = cfg.agent.setup_timeout_sec  # dedicated install window
     verifier_net = cfg.verifier.network_mode
     separate_verifier = cfg.verifier.environment_mode == "separate"
     artifacts = list(cfg.artifacts)
@@ -268,11 +299,30 @@ def _run_trial_once(
         verifier_user = str(cfg.verifier.user)
 
     env = environment_factory(backend, task_dir, **env_cfg)
+    setup_timeout = e.setup_timeout_sec  # wall-clock cap for container-start phase
 
     # 0. Build the room — this is the slow phase (Docker image build + container).
+    # build_timeout_sec guards the image build/pull; setup_timeout_sec guards the
+    # container-start and post-start execs that follow. Without this outer cap a
+    # hung sandbox provision can block the worker indefinitely.
     _phase(on_event, "setup", PhaseStatus.RUNNING, detail="building image")
     try:
-        env.setup()
+        with _cf.ThreadPoolExecutor(max_workers=1) as _pool:
+            _fut = _pool.submit(env.setup)
+            _fut.result(timeout=setup_timeout)
+    except _cf.TimeoutError:
+        try:
+            env.teardown()
+        except Exception:
+            pass
+        err = f"env.setup() timed out after {setup_timeout}s (container-start phase)"
+        _phase(on_event, "setup", PhaseStatus.ERROR, detail=err[:200])
+        log.error("trial_error", extra={"task": task_label, "phase": "setup", "error": err[:200]})
+        return TrialOutcome(
+            status=TrialStatus.ERROR.value,
+            error=f"Room setup failed: {err}",
+            duration_s=time.time() - start,
+        )
     except Exception as e:
         _phase(on_event, "setup", PhaseStatus.ERROR, detail=str(e)[:200])
         log.error(
@@ -289,10 +339,139 @@ def _run_trial_once(
     verifier_env_obj = None
     try:
         # 1. Agent works. Apply the agent-phase network override (or baseline).
-        env.set_network(agent_net or baseline_net)
+        try:
+            env.set_network(agent_net or baseline_net, allowed_hosts=agent_allowed_hosts or None)
+        except RuntimeError as e:
+            detail = str(e)
+            _phase(on_event, "agent", PhaseStatus.ERROR, detail=detail[:200])
+            log.error("trial_error", extra={"task": task_label, "phase": "agent_network", "error": detail[:200]})
+            return TrialOutcome(
+                status=TrialStatus.ERROR.value,
+                error=f"Agent network switch failed: {detail}",
+                duration_s=time.time() - start,
+            )
+        agent = agent_factory(agent_name, task_dir, model=model, max_steps=agent_max_steps)
+
+        # Multi-step: run agent+verify once per step using the shared sandbox.
+        # Single-step tasks have cfg.steps == [] and take the else branch below.
+        task_steps_cfg = cfg.steps  # StepConfig list; empty = single-step
+        if task_steps_cfg:
+            step_verdicts: list = []
+            all_llm_calls: list = []
+            all_agent_errors: list = []
+            last_agent_result = None
+
+            for step_idx, step_cfg in enumerate(task_steps_cfg):
+                step_label = f"step {step_idx + 1}/{len(task_steps_cfg)}"
+                step_instr_path = task_dir / step_cfg.instruction_file
+                step_instruction = (
+                    step_instr_path.read_text(errors="replace")
+                    if step_instr_path.exists()
+                    else instruction
+                )
+                step_tests_dir = task_dir / step_cfg.tests_dir
+
+                _phase(on_event, "agent", PhaseStatus.RUNNING, step=step_idx + 1, total_steps=len(task_steps_cfg))
+                step_result = agent.run(
+                    step_instruction, env,
+                    timeout=step_cfg.agent_timeout_sec,
+                    on_event=on_event,
+                    setup_timeout=agent_setup_timeout if step_idx == 0 else None,
+                )
+                last_agent_result = step_result
+                steps.extend(s.to_step() for s in step_result.steps)
+                _phase(on_event, "agent", PhaseStatus.DONE, agent_error=step_result.error, step=step_idx + 1)
+                for f in getattr(step_result, "guardrail_flags", None) or []:
+                    _warn(on_event, warnings, f"guardrail [{step_label}]: {f['message']} — `{f['command']}`")
+                all_agent_errors.extend([step_result.error] if step_result.error else [])
+                all_llm_calls.extend(getattr(step_result, "llm_calls", None) or [])
+
+                _phase(on_event, "verify", PhaseStatus.RUNNING, step=step_idx + 1)
+                try:
+                    env.set_network(verifier_net or baseline_net)
+                except RuntimeError as ve:
+                    _warn(on_event, warnings, f"verifier network switch failed [{step_label}]: {ve}")
+                step_verdict = run_verifier(
+                    env,
+                    step_tests_dir,
+                    timeout=step_cfg.verifier_timeout_sec,
+                    pass_threshold=pass_threshold,
+                    verifier_user=verifier_user,
+                )
+                step_verdicts.append(step_verdict)
+                steps.append(step_verdict.step.to_step())
+                if on_event:
+                    vs = step_verdict.step
+                    on_event({
+                        "type": "step",
+                        "phase": "verifier",
+                        "command": vs.command,
+                        "status": PhaseStatus.DONE.value,
+                        "exit_code": vs.exit_code,
+                        "stdout": vs.stdout[-2000:],
+                        "stderr": vs.stderr[-800:],
+                        "step": step_idx + 1,
+                    })
+                _phase(on_event, "verify", PhaseStatus.DONE, step=step_idx + 1)
+                # Switch back to agent network for next step
+                try:
+                    env.set_network(agent_net or baseline_net, allowed_hosts=agent_allowed_hosts or None)
+                except RuntimeError:
+                    pass
+
+            # Aggregate: mean reward, pass only if ALL steps pass.
+            mean_reward = sum(v.reward for v in step_verdicts) / len(step_verdicts)
+            all_passed = all(v.passed for v in step_verdicts)
+            combined_log = "\n---\n".join(v.log or "" for v in step_verdicts)
+            combined_error = "; ".join(all_agent_errors) or None
+            agent_steps = [s for s in (last_agent_result.steps if last_agent_result else []) if getattr(s, "phase", None) == "agent"]
+            _phase(on_event, "score", PhaseStatus.DONE, reward=mean_reward, passed=all_passed)
+            judge_calls = [
+                (v.payload or {}).get("llm_call")
+                for v in step_verdicts
+                if (v.payload or {}).get("llm_call")
+            ]
+            all_llm_calls.extend(judge_calls)
+            trajectory = {
+                "tt_schema_version": "1.0",
+                "agent": agent_name,
+                "model": model,
+                "steps": steps,
+                "execution": _execution_record(backend, env),
+                "agent_error": combined_error,
+                "warnings": warnings,
+                "llm_calls": all_llm_calls,
+                "llm_usage_summary": _summarize_llm_usage(all_llm_calls),
+                "prompt_version": getattr(last_agent_result, "prompt_version", None),
+                "agent_version": getattr(last_agent_result, "agent_version", None),
+                "guardrail_flags": getattr(last_agent_result, "guardrail_flags", None) or [],
+                "agent_native_trajectory": getattr(last_agent_result, "raw_trajectory", None),
+                "step_rewards": [v.reward for v in step_verdicts],
+            }
+            duration = time.time() - start
+            log.info("trial_end", extra={
+                "task": task_label, "agent": agent_name, "model": model,
+                "passed": all_passed, "reward": mean_reward, "duration_s": round(duration, 2),
+                "n_steps": len(task_steps_cfg), "llm_calls": len(all_llm_calls),
+            })
+            return TrialOutcome(
+                status=TrialStatus.COMPLETED.value,
+                reward=mean_reward,
+                passed=all_passed,
+                trajectory=trajectory,
+                verifier_log=combined_log,
+                reward_payload={"step_rewards": [v.reward for v in step_verdicts]},
+                duration_s=duration,
+                error=combined_error,
+                warnings=warnings,
+            )
+
+        # ── Single-step path (original behaviour, unchanged) ──────────────────
         _phase(on_event, "agent", PhaseStatus.RUNNING)
-        agent = agent_factory(agent_name, task_dir, model=model)
-        agent_result = agent.run(instruction, env, timeout=agent_timeout, on_event=on_event)
+        agent_result = agent.run(
+            instruction, env, timeout=agent_timeout, on_event=on_event,
+            setup_timeout=agent_setup_timeout,
+        )
         steps.extend(s.to_step() for s in agent_result.steps)
         _phase(on_event, "agent", PhaseStatus.DONE, agent_error=agent_result.error)
         agent_steps = [s for s in agent_result.steps if getattr(s, "phase", None) == "agent"]
@@ -370,7 +549,10 @@ def _run_trial_once(
                 copy_tests=False,
             )  # test.sh is baked into the image
         else:
-            env.set_network(verifier_net or baseline_net)  # verifier-phase network
+            try:
+                env.set_network(verifier_net or baseline_net)
+            except RuntimeError as e:
+                _warn(on_event, warnings, f"verifier network switch failed: {e}")
             verdict = run_verifier(
                 env,
                 tests_dir,
@@ -404,9 +586,11 @@ def _run_trial_once(
         if judge_call:
             llm_calls.append(judge_call)
         trajectory = {
+            "tt_schema_version": "1.0",
             "agent": agent_name,
             "model": model,
             "steps": steps,
+            "execution": _execution_record(backend, env),
             "agent_error": agent_result.error,
             "warnings": warnings,
             # LLM spend/latency instrumentation — see app.services.llm.LLMCallResult.
@@ -414,6 +598,9 @@ def _run_trial_once(
             "llm_calls": llm_calls,
             "llm_usage_summary": _summarize_llm_usage(llm_calls),
             "prompt_version": getattr(agent_result, "prompt_version", None),
+            # The agent's own version, so two scores taken weeks apart are
+            # comparable — or are visibly not.
+            "agent_version": getattr(agent_result, "agent_version", None),
             "guardrail_flags": getattr(agent_result, "guardrail_flags", None) or [],
             # An external agent's own trajectory (e.g. Mini-SWE's), if it produced
             # one — its full internal reasoning, preserved for inspection/export.
@@ -454,7 +641,12 @@ def _run_trial_once(
         )
         return TrialOutcome(
             status=TrialStatus.ERROR.value,
-            trajectory={"agent": agent_name, "steps": steps, "warnings": warnings},
+            trajectory={
+                "agent": agent_name,
+                "steps": steps,
+                "warnings": warnings,
+                "execution": _execution_record(backend, env),
+            },
             error=f"Trial failed: {e}",
             duration_s=time.time() - start,
             warnings=warnings,

@@ -35,7 +35,11 @@ def factories(env=None, agent=None):
         env.kwargs = kw
         return env
 
-    def agent_factory(name, task_dir, model=None):
+    def agent_factory(name, task_dir, model=None, **kw):
+        # The seam is typed Callable[..., BaseAgent] — variadic on purpose, so the
+        # runner can thread new per-task settings (max_steps, …) without every
+        # double having to be rewritten. Recorded so tests can assert on them.
+        agent.factory_kwargs = kw
         return agent
 
     return env_factory, agent_factory, made
@@ -181,3 +185,82 @@ class TestUsageRollup:
             agent=FakeAgent(commands=["x"], llm_calls=[{"api_calls": 12, "cost_usd": 0.5}]),
         )
         assert outcome.trajectory["llm_usage_summary"]["calls"] == 12
+
+
+class TestMultiStep:
+    """Multi-step tasks: shared sandbox, per-step agent+verify, mean reward."""
+
+    def _make_multi_step_task(self, tmp_path):
+        """Create a two-step task directory with steps/ auto-detection layout."""
+        d = tmp_path / "multi-step-task"
+        (d / "environment").mkdir(parents=True)
+        (d / "environment" / "Dockerfile").write_text("FROM busybox")
+        (d / "task.toml").write_text(
+            'schema_version = "1.3"\n\n'
+            '[task]\nname = "test/multi-step"\n\n'
+            '[environment]\nnetwork_mode = "no-network"\n'
+        )
+        for step, (instr, reward) in enumerate(
+            [("Step 1: write hello.txt", "0.5"), ("Step 2: write world.txt", "1.0")], 1
+        ):
+            sd = d / "steps" / f"0{step}-step"
+            (sd / "tests").mkdir(parents=True)
+            (sd / "instruction.md").write_text(instr)
+            # test.sh emits REWARD=<value> so the verifier scores it
+            (sd / "tests" / "test.sh").write_text(
+                f"#!/bin/sh\necho REWARD={reward}\nexit 0\n"
+            )
+        return d
+
+    def test_multi_step_mean_reward(self, tmp_path):
+        """Final reward is mean of per-step rewards: both steps score 0.75 → mean 0.75."""
+        task_dir = self._make_multi_step_task(tmp_path)
+        env = FakeEnvironment(task_dir)
+        # Verifier reads /logs/verifier/reward.txt; plant 0.75 for each step.
+        env.files["/logs/verifier/reward.txt"] = "0.75"
+        outcome, _ = run(task_dir, env=env)
+        assert outcome.status == "completed"
+        assert outcome.reward == 0.75
+        # The trajectory carries per-step rewards
+        assert "step_rewards" in outcome.trajectory
+        assert outcome.trajectory["step_rewards"] == [0.75, 0.75]
+
+    def test_multi_step_all_must_pass_for_passed(self, tmp_path):
+        """passed=True only when all steps pass; a 0.0 step makes passed=False."""
+        task_dir = self._make_multi_step_task(tmp_path)
+        env = FakeEnvironment(task_dir)
+        # reward.txt = 0.0 → both steps fail the default 0.5 pass_threshold
+        env.files["/logs/verifier/reward.txt"] = "0.0"
+        outcome, _ = run(task_dir, env=env)
+        assert not outcome.passed
+
+    def test_single_step_path_unaffected(self, task_dir):
+        """A task without steps/ still runs the original single-step path."""
+        outcome, _ = run(task_dir)
+        assert outcome.status == "completed"
+        assert "step_rewards" not in outcome.trajectory
+
+
+class TestSchemaVersion:
+    """B — every trajectory carries tt_schema_version so consumers can detect breakage."""
+
+    def test_single_step_trajectory_has_schema_version(self, task_dir):
+        outcome, _ = run(task_dir)
+        assert outcome.trajectory.get("tt_schema_version") == "1.0"
+
+    def test_multi_step_trajectory_has_schema_version(self, tmp_path):
+        d = tmp_path / "ms"
+        (d / "environment").mkdir(parents=True)
+        (d / "environment" / "Dockerfile").write_text("FROM busybox")
+        (d / "task.toml").write_text(
+            'schema_version = "1.3"\n[task]\nname = "test/ms"\n[environment]\nnetwork_mode = "no-network"\n'
+        )
+        for i, name in enumerate(["01-a", "02-b"], 1):
+            sd = d / "steps" / name
+            (sd / "tests").mkdir(parents=True)
+            (sd / "instruction.md").write_text(f"step {i}")
+            (sd / "tests" / "test.sh").write_text("#!/bin/sh\nexit 0\n")
+        env = FakeEnvironment(d)
+        env.files["/logs/verifier/reward.txt"] = "1.0"
+        outcome, _ = run(d, env=env)
+        assert outcome.trajectory.get("tt_schema_version") == "1.0"
