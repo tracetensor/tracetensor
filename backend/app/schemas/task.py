@@ -70,6 +70,9 @@ class EnvironmentConfig(BaseModel):
     """The examination room the agent works inside."""
 
     build_timeout_sec: float = 600.0
+    # Separate cap for container-start + post-start execs (docker run + mkdir/chmod).
+    # The build phase has its own build_timeout_sec; this guards the start phase.
+    setup_timeout_sec: float = 60.0
     network_mode: str = "public"  # public | no-network | allowlist
     allowed_hosts: list[str] = Field(default_factory=list)
     docker_image: Optional[str] = None
