@@ -85,6 +85,14 @@ from app.services.environment import (  # noqa: E402
 
 check("docker + podman are registered", {"docker", "podman"} <= set(available_backends()))
 check(
+    "cloud backends are registered",
+    {"daytona", "e2b", "modal", "runloop", "novita"} <= set(available_backends()),
+)
+check(
+    "daytona resolves to DaytonaEnvironment",
+    type(make_environment("daytona", Path("/tmp"))).__name__ == "DaytonaEnvironment",
+)
+check(
     "podman backend -> PodmanEnvironment",
     type(make_environment("podman", Path("/tmp"))).__name__ == "PodmanEnvironment",
 )

@@ -80,6 +80,7 @@ class DatasetRun(Base):
     model: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
     n_trials: Mapped[int] = mapped_column(Integer, default=1)
     concurrency: Mapped[int] = mapped_column(Integer, default=4)
+    backend: Mapped[str] = mapped_column(String(40), default="docker")
 
     # queued -> running -> completed | failed
     status: Mapped[str] = mapped_column(String(30), default=JobStatus.QUEUED.value, index=True)

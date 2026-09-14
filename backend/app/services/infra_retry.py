@@ -1,38 +1,39 @@
-"""Infra-only trial retries — setup/Docker flakes, never paid LLM re-runs."""
+"""Infra-only trial retries — setup/provider flakes, never paid LLM re-runs."""
 
 from __future__ import annotations
 
 from app.models.enums import TrialStatus
+from app.services.failure_classifier import FailureKind, classify, is_retryable_kind
 
-_INFRA_MARKERS = (
-    "room setup failed",
-    "docker",
-    "connection reset",
-    "connection refused",
-    "i/o timeout",
-    "i/o error",
-    "build failed",
-    "manifest",
-    "platform",
-    "no space left",
-    "temporary failure",
-    "deadline exceeded",
-    "container",
-)
+
+def failure_kind(outcome: object) -> FailureKind:
+    """The classified kind of an errored trial (UNKNOWN if it didn't error)."""
+    if getattr(outcome, "status", None) != TrialStatus.ERROR.value:
+        return FailureKind.UNKNOWN
+    return classify(getattr(outcome, "error", None))
 
 
 def is_infra_retryable(outcome: object) -> bool:
-    """True when a trial died before meaningful agent work (safe to re-run)."""
+    """True when a trial died before meaningful agent work (safe to re-run).
+
+    Two independent gates, and both must pass:
+
+    1. The failure's *kind* must be one that a retry can actually fix. This
+       replaced a substring scan that retried anything mentioning "docker",
+       including permanent credential errors.
+    2. Nothing was spent. Any recorded step or LLM call means the agent had
+       started working, so a re-run is a second paid attempt rather than a
+       recovery — regardless of how the trial eventually died.
+    """
     if getattr(outcome, "status", None) != TrialStatus.ERROR.value:
         return False
-    err = (getattr(outcome, "error", None) or "").lower()
-    if not any(m in err for m in _INFRA_MARKERS):
+    if not is_retryable_kind(classify(getattr(outcome, "error", None))):
         return False
     traj = getattr(outcome, "trajectory", None) or {}
-    steps = traj.get("steps") if isinstance(traj, dict) else None
-    if steps:
+    if not isinstance(traj, dict):
+        return True
+    if traj.get("steps"):
         return False
-    llm = traj.get("llm_calls") if isinstance(traj, dict) else None
-    if llm:
+    if traj.get("llm_calls"):
         return False
     return True

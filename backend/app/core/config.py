@@ -136,8 +136,69 @@ class Settings:
         self.AGENT_MAX_TURNS: int = int(os.getenv("AGENT_MAX_TURNS", "40"))
         # Command budget for the built-in bash loop (app.services.agents.llm_agent).
         # Lower than the installed agents' turn caps because each step here is a full
-        # model round-trip that we pay for directly.
-        self.LLM_AGENT_MAX_STEPS: int = int(os.getenv("LLM_AGENT_MAX_STEPS", "12"))
+        # model round-trip that we pay for directly. 200 steps matches Harbor's
+        # agent budget and avoids agents timing out on real SWE tasks.
+        self.LLM_AGENT_MAX_STEPS: int = int(os.getenv("LLM_AGENT_MAX_STEPS", "200"))
+        # Per-command cap for the built-in bash loop's agent-phase commands.
+        # Without this, a single command is allowed to run for whatever time is
+        # LEFT in the whole session (see llm_agent.py's `remaining` timeout) — a
+        # command that hangs or is pathologically slow (e.g. an unscoped
+        # `grep -r /`) can silently consume nearly the entire trial with no
+        # other step getting a chance to run. 300s matches the precedent used by
+        # other agentic benchmarks (e.g. scBench's per-command cap) for the same
+        # reason. Does not apply to the verifier's test.sh run, which is a
+        # separate exec() call under phase="verifier" and needs to run to
+        # completion for grading to be meaningful.
+        self.LLM_AGENT_COMMAND_TIMEOUT_SEC: float = float(
+            os.getenv("LLM_AGENT_COMMAND_TIMEOUT_SEC", "500")
+        )
+
+        # Loop-level retry for transient LLM provider errors (overload, rate
+        # limit, 5xx, connection drop) that survive the SDK client's own
+        # max_retries (LLM_TIMEOUT_SEC/LLM_MAX_RETRIES in app.services.llm) — a
+        # sustained overload window can outlast a couple of SDK-level retries
+        # with short backoff. Without this, ANY exception from the LLM call
+        # (transient or not) ends the whole trial immediately, discarding every
+        # step already taken. Only errors classified as transient are retried
+        # (see app.services.agents.base.is_transient_llm_error) — auth/bad-request/
+        # permission errors fail fast as before, since retrying those never helps.
+        self.LLM_AGENT_TRANSIENT_RETRY_MAX: int = int(
+            os.getenv("LLM_AGENT_TRANSIENT_RETRY_MAX", "5")
+        )
+        self.LLM_AGENT_TRANSIENT_RETRY_BACKOFF_SEC: float = float(
+            os.getenv("LLM_AGENT_TRANSIENT_RETRY_BACKOFF_SEC", "15")
+        )
+
+        # ---- Diagnose (docs/DIAGNOSE.md) -----------------------------------------
+        # Rule-based failure classification after each trial. Free and offline,
+        # so it defaults on; it only annotates the trajectory, never the grade.
+        self.DIAGNOSE_ENABLED: bool = os.getenv("DIAGNOSE_ENABLED", "true").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        # The LLM extraction pass costs a model call per failed trial, so it is
+        # opt-in — same stance as everything else that spends money.
+        self.DIAGNOSE_LLM_ENABLED: bool = os.getenv("DIAGNOSE_LLM_ENABLED", "false").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        # provider/model for the extractor; bare model assumes openai.
+        self.DIAGNOSE_MODEL: str | None = os.getenv("DIAGNOSE_MODEL")
+
+        # ---- LangGraph adapter ---------------------------------------------------
+        # The agent under test lives OUTSIDE the task: a project directory holding a
+        # langgraph.json registry plus the code it points at. Harbor passes this as
+        # --project-path; we take it from the environment because `make_agent` only
+        # receives (task_dir, model) and the project is a property of the run, not
+        # the task. LANGGRAPH_GRAPH picks one entry when the registry declares
+        # several; unset means "the first one declared".
+        self.LANGGRAPH_PROJECT: str | None = os.getenv("LANGGRAPH_PROJECT")
+        self.LANGGRAPH_GRAPH: str | None = os.getenv("LANGGRAPH_GRAPH")
+        # Graph steps before LangGraph raises GraphRecursionError. A ReAct agent
+        # spends ~2 nodes per tool call, so this is roughly half the tool budget.
+        self.LANGGRAPH_RECURSION_LIMIT: int = int(os.getenv("LANGGRAPH_RECURSION_LIMIT", "50"))
 
         # How long live-progress events are kept before pruning. Generously
         # longer than a stream can stay open (it self-terminates at twice the

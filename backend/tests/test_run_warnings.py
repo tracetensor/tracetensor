@@ -8,6 +8,8 @@ from pathlib import Path
 BACKEND = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND))
 
+from unittest.mock import patch
+
 from app.services.run_warnings import run_warnings  # noqa: E402
 from app.services.task_parser import parse_task_toml  # noqa: E402
 
@@ -48,6 +50,13 @@ check(
     "agentic + mini-swe → no multi-file warning",
     not any("multi-file" in w for w in run_warnings(agentic, _cfg(agentic), "mini-swe")),
 )
+
+with patch("app.services.run_warnings.host_is_arm64", return_value=True):
+    warnings = run_warnings(sort_csv, _cfg(sort_csv), "openai")
+    check(
+        "arm64 host adds platform warning when task.toml has no platform",
+        any("Apple Silicon" in w for w in warnings),
+    )
 
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

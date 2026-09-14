@@ -326,6 +326,15 @@ async def start_dataset_run(
     # Thin by design — the orchestration lives in
     # app.services.job_service.create_dataset_run.
     concurrency = validate_trial_params(req.n_trials, req.concurrency, ceiling=MAX_CONCURRENCY)
+    from app.services.backend_catalog import backend_not_ready_message, normalize_backend
+
+    try:
+        normalize_backend(req.backend)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    block = backend_not_ready_message(req.backend)
+    if block:
+        raise HTTPException(status_code=400, detail=block)
     try:
         created = await job_service.create_dataset_run(
             db,
@@ -334,6 +343,7 @@ async def start_dataset_run(
             model=req.model,
             n_trials=req.n_trials,
             concurrency=concurrency,
+            backend=req.backend,
             idempotency_key=request.headers.get("Idempotency-Key"),
         )
     except job_service.NotFound as e:

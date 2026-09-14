@@ -62,6 +62,9 @@ class Job(Base):
     # Trial fan-out width for this job — stored so a worker that CLAIMS the job
     # off the queue can reconstruct the run without the original request.
     concurrency: Mapped[int] = mapped_column(Integer, default=4)
+    # Execution backend (docker, podman, daytona, …). Stored on the job so
+    # workers on other machines run the same environment the client requested.
+    backend: Mapped[str] = mapped_column(String(40), default="docker")
 
     # queued -> running -> completed | failed
     status: Mapped[str] = mapped_column(String(30), default=JobStatus.QUEUED.value, index=True)

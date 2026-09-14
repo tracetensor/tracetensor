@@ -69,6 +69,11 @@ def run(
         "--platform",
         help="Docker platform override (e.g. linux/amd64). Default: task.toml or arm64 auto.",
     ),
+    backend: str = typer.Option(
+        "docker",
+        "--backend",
+        help="Execution backend: docker, podman, daytona, modal, e2b, runloop, novita.",
+    ),
     output: Path = typer.Option(
         Path("runs"), "-o", "--output", help="Where to write run artifacts (local mode)."
     ),
@@ -97,6 +102,7 @@ def run(
         from app.core.logging import configure_logging
 
         configure_logging()
+    from app.cli.backends import ensure_backend_ready
     from app.core.config import settings
     from app.services.agents import AgentConfigError, resolve_agent
     from app.services.run_warnings import run_warnings
@@ -131,6 +137,27 @@ def run(
         raise typer.Exit(2) from e
 
     conc = concurrency or min(4, n_trials)
+    resolved_backend = ensure_backend_ready(backend)
+
+    # Refuse an unrunnable task before anything is provisioned. Left to the trial
+    # this surfaces only after a sandbox exists — and on a cloud backend, after
+    # it has been paid for.
+    if parsed_cfg:
+        from app.services.backend_capabilities import unsupported_features
+
+        blockers = unsupported_features(resolved_backend, parsed_cfg)
+        if blockers:
+            from rich.markup import escape
+
+            ui.console.print()
+            ui.console.print(f"[bad]✗[/] this task cannot run on the {resolved_backend} backend:")
+            for reason in blockers:
+                # Escaped: these messages name TOML tables like [agent] and
+                # [environment], which Rich would otherwise read as style tags
+                # and silently delete — removing the very words that say which
+                # setting to change.
+                ui.console.print(f"  [bad]•[/] {escape(reason)}")
+            raise typer.Exit(1)
 
     if n_trials > 10 and not json_out:
         ui.warn(f"{n_trials} trials will run — confirm cost/time before large batches.")
@@ -141,11 +168,24 @@ def run(
             ("agent", agent + (f" · {model}" if model else "")),
             ("trials", f"{n_trials}  (×{conc} parallel)"),
             ("timeouts", f"agent {int(agent_to)}s · verifier {int(verifier_to)}s"),
-            ("where", server if server else "local · docker"),
+            ("where", server if server else f"local · {resolved_backend}"),
         ]
         ui.console.print()
         ui.console.print(ui.kv_panel("run", rows))
-        if parsed_cfg:
+        if parsed_cfg and resolved_backend in ("docker", "podman"):
+            from app.services.local_preflight import assess_local_run
+
+            seen: set[str] = set()
+            for w in run_warnings(task_dir, parsed_cfg, agent):
+                ui.warn(w)
+                seen.add(w)
+            tier, preflight = assess_local_run(task_dir, parsed_cfg)
+            for w in preflight:
+                if w not in seen:
+                    ui.warn(w)
+            if tier.value != "native":
+                ui.hint(f"Local run tier: {tier.value}")
+        elif parsed_cfg:
             for w in run_warnings(task_dir, parsed_cfg, agent):
                 ui.warn(w)
 
@@ -161,6 +201,7 @@ def run(
             model,
             n_trials,
             conc,
+            resolved_backend,
             json_out,
             open_dashboard=open_dashboard,
         )
@@ -171,13 +212,14 @@ def run(
     t0 = time.time()
     try:
         if not json_out:
-            with ui.console.status("[muted]preparing sandbox (building image)…", spinner="dots"):
-                prebuild(task_dir, "docker")
+            with ui.console.status("[muted]preparing sandbox…", spinner="dots"):
+                prebuild(task_dir, resolved_backend)
         else:
-            prebuild(task_dir, "docker")
+            prebuild(task_dir, resolved_backend)
     except Exception as e:
         ui.error(f"Could not prepare the sandbox: {e}")
-        ui.hint("Is the Docker daemon running?")
+        if resolved_backend in ("docker", "podman"):
+            ui.hint("Is the Docker daemon running?")
         raise typer.Exit(1) from e
 
     results: list[dict] = [{} for _ in range(n_trials)]
@@ -198,7 +240,7 @@ def run(
             instruction=instruction,
             agent_name=agent,
             model=model,
-            backend="docker",
+            backend=resolved_backend,
             agent_timeout=agent_to,
             verifier_timeout=verifier_to,
             on_event=_tag,
@@ -251,7 +293,7 @@ def run(
 
     saved_to = None
     if not no_save:
-        saved_to = str(_save(output, name, agent, model, results, passed, mean_reward, wall))
+        saved_to = str(_save(output, name, agent, model, resolved_backend, results, passed, mean_reward, wall))
 
     _report(name, agent, model, n_trials, results, wall, json_out, saved=saved_to, link=False)
     # Nonzero exit if nothing passed, so CI can gate on it.
@@ -353,6 +395,7 @@ def _run_remote(
     model: str | None,
     n_trials: int,
     conc: int | None,
+    backend: str,
     json_out: bool,
     open_dashboard: bool = False,
 ) -> tuple[list, float, str]:
@@ -374,7 +417,13 @@ def _run_remote(
         job_id = client.start_examination(
             base,
             task_id,
-            {"agent": agent, "model": model, "n_trials": n_trials, "concurrency": conc},
+            {
+                "agent": agent,
+                "model": model,
+                "n_trials": n_trials,
+                "concurrency": conc,
+                "backend": backend,
+            },
             token,
         )
     except client.ServerError as e:
@@ -451,6 +500,7 @@ def _save(
     name: str,
     agent: str,
     model: str | None,
+    backend: str,
     results: list,
     passed: int,
     mean_reward: float | None,
@@ -466,6 +516,7 @@ def _save(
                 "task": name,
                 "agent": agent,
                 "model": model,
+                "backend": backend,
                 "n_trials": len(results),
                 "passed": passed,
                 "mean_reward": mean_reward,

@@ -20,7 +20,7 @@ class ExamineRequest(BaseModel):
     agent: str = "anthropic"
     model: Optional[str] = None  # a model id from the catalog (llm.MODELS)
     n_trials: int = 1
-    backend: str = "docker"  # docker only (kept for forward-compat)
+    backend: str = "docker"  # docker | podman | daytona | modal | e2b | runloop | novita
     # How many trials to run at once (trial parallelism). None → a safe
     # per-machine default (min(n_trials, 4)). Bounded 1..16 at the endpoint.
     concurrency: Optional[int] = None
@@ -93,6 +93,7 @@ class BackendEntry(BaseModel):
     id: str
     label: str
     available: bool
+    ready: bool = False
 
 
 class ProvidersView(BaseModel):

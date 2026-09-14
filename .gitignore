@@ -38,8 +38,8 @@ vault-export/
 # Local notes / chat dumps
 claude_share_*
 
-# Internal product strategy (lives in tracetensor-full, not OSS)
-ideas/
+# Internal product strategy — tracked on `ideation` branch only; not on OSS `main`
+# ideas/
 
 # Task-store artifacts written by local runs / tests (TASKS_ROOT).
 backend/_tasks_test/

@@ -87,6 +87,23 @@ def _codex(task_dir: Path, model: Optional[str]) -> BaseAgent:
     return CodexAgent(model)
 
 
+def _langgraph(task_dir: Path, model: Optional[str]) -> BaseAgent:
+    from app.services.agents.langgraph_agent import LangGraphAgent
+
+    # project=None → taken from settings.LANGGRAPH_PROJECT, since the registry
+    # factory only receives the task and the model.
+    return LangGraphAgent(None, model)
+
+
+def langgraph_key_check(model: str, settings: object) -> Optional[str]:
+    """LangGraph needs a project to run *and* a model key to run it with. Report
+    the project first: without it there is no agent at all, and a key error would
+    point at the wrong missing piece."""
+    if not getattr(settings, "LANGGRAPH_PROJECT", None):
+        return "LANGGRAPH_PROJECT"
+    return litellm_key_check(model, settings)
+
+
 AGENTS: dict[str, AgentSpec] = {
     spec.name: spec
     for spec in (
@@ -126,6 +143,16 @@ AGENTS: dict[str, AgentSpec] = {
             note="Passed a real in-container run on fix-add.",
             default_model="gpt-5-codex",
             key_check=fixed_key_check("OPENAI_API_KEY"),
+        ),
+        AgentSpec(
+            name="langgraph",
+            factory=_langgraph,
+            label="LangGraph / Deep Agents",
+            status="verified",
+            note="Passed real in-sandbox runs on langgraph-report (docker + daytona).",
+            default_model="anthropic/claude-haiku-4-5",
+            key_check=langgraph_key_check,
+            aliases=("lg", "deep-agent"),
         ),
     )
 }

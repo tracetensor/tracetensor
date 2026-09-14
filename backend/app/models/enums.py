@@ -67,6 +67,19 @@ class TrialStatus(_StrEnum):
     ERROR = "error"
 
 
+class DiagnosisStatus(_StrEnum):
+    """State of a trial's `failure_analysis` block (docs/DIAGNOSE.md).
+
+    Separate from TrialStatus on purpose: diagnosis is a post-hoc pass over a
+    finished trial, so its lifecycle is its own — `skipped` (nothing to
+    diagnose / feature off) is a valid end state that TrialStatus has no word
+    for."""
+
+    COMPLETED = "completed"
+    SKIPPED = "skipped"
+    ERROR = "error"
+
+
 class PhaseStatus(_StrEnum):
     """Progress markers on the live SSE stream — a phase or a single command
     starting, finishing, or blowing up.
