@@ -22,7 +22,6 @@ from typing import Optional
 import typer
 
 from app.cli import console as ui
-from app.schemas.registry import looks_like_package_ref
 
 dataset_app = typer.Typer(
     help="Run or fetch a dataset (a directory of tasks).", no_args_is_help=True
@@ -165,36 +164,10 @@ def pull_dataset(
     ),
     out: Path = typer.Option(Path("tasks"), "-o", "--out", help="Where to write task dirs."),
 ) -> None:
-    """Fetch a dataset into local task directories (local / git / swebench / Harbor Hub)."""
+    """Fetch a dataset into local task directories (local path, git URL, or swebench)."""
     import shutil
 
     out.mkdir(parents=True, exist_ok=True)
-
-    # 0) Harbor Hub package dataset (org/name@tag).
-    if looks_like_package_ref(source):
-        from app.services.harbor_registry import (
-            HarborRegistryClient,
-            RegistryAuthError,
-            RegistryError,
-            RegistryNotFoundError,
-        )
-
-        client = HarborRegistryClient()
-        try:
-            result = client.download_dataset(source, output_dir=out, overwrite=False)
-        except RegistryNotFoundError as e:
-            ui.error(str(e))
-            raise typer.Exit(2) from e
-        except RegistryAuthError as e:
-            ui.error(f"{e} Set TRACETENSOR_REGISTRY_TOKEN for private packages.")
-            raise typer.Exit(2) from e
-        except RegistryError as e:
-            ui.error(str(e))
-            raise typer.Exit(1) from e
-        ui.console.print(
-            f"[ok]✓[/] pulled {len(result.paths)} task(s) → {result.dataset_dir}"
-        )
-        raise typer.Exit(0)
 
     # 1) SWE-Bench Verified via the importer (needs the .venv-swebench toolenv).
     if source == "swebench" or source.startswith("swebench:"):
