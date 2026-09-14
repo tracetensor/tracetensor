@@ -433,6 +433,7 @@ def _run_trial_once(
             ]
             all_llm_calls.extend(judge_calls)
             trajectory = {
+                "tt_schema_version": "1.0",
                 "agent": agent_name,
                 "model": model,
                 "steps": steps,
@@ -585,6 +586,7 @@ def _run_trial_once(
         if judge_call:
             llm_calls.append(judge_call)
         trajectory = {
+            "tt_schema_version": "1.0",
             "agent": agent_name,
             "model": model,
             "steps": steps,
