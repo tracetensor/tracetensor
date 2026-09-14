@@ -377,3 +377,66 @@ def diagnose_cmd(
                 _json.dumps(data, indent=2, default=str), encoding="utf-8"
             )
             ui.hint(f"failure_analysis written → {run_dir / 'result.json'}")
+
+
+@vault_app.command("trend")
+def trend_cmd(
+    runs: Path = typer.Option(Path("runs"), "--runs", help="Local runs directory."),
+    agent: Optional[str] = typer.Option(None, "--agent", help="Filter to one agent."),
+    last: int = typer.Option(10, "--last", help="Most recent runs to include per task."),
+    task_filter: Optional[str] = typer.Option(None, "--task", help="Substring filter on task name."),
+) -> None:
+    """Show reward trend (sparkline) per task across recent runs."""
+    _SPARKS = " ▁▂▃▄▅▆▇█"
+
+    def _spark(rewards: list[float]) -> str:
+        if not rewards:
+            return ""
+        chars = []
+        for r in rewards:
+            idx = min(int(r * (len(_SPARKS) - 1)), len(_SPARKS) - 1)
+            chars.append(_SPARKS[idx])
+        return "".join(chars)
+
+    all_rows = vault_svc.list_local_runs(runs)
+    if agent:
+        all_rows = [r for r in all_rows if r.get("agent") == agent]
+
+    # Group by task name, preserving time order (list_local_runs returns newest first).
+    from collections import defaultdict
+    by_task: dict[str, list] = defaultdict(list)
+    for row in reversed(all_rows):  # oldest first
+        task = row.get("task") or row.get("id") or "unknown"
+        if task_filter and task_filter not in task:
+            continue
+        rate = row.get("pass_rate")
+        if rate is None:
+            continue
+        by_task[task].append(rate)
+
+    if not by_task:
+        ui.hint("No runs found." + (f" (agent={agent})" if agent else ""))
+        return
+
+    ui.banner()
+    t = Table(box=None, pad_edge=False, expand=False)
+    t.add_column("Task", no_wrap=True)
+    t.add_column("Runs", justify="right", style="muted")
+    t.add_column("Sparkline", no_wrap=True)
+    t.add_column("Trend", justify="right")
+
+    for task, rates in sorted(by_task.items()):
+        window = rates[-last:]
+        spark = _spark(window)
+        delta = window[-1] - window[0] if len(window) > 1 else 0.0
+        if delta > 0.05:
+            trend_s = f"[ok]↑ +{delta:.2f}[/]"
+        elif delta < -0.05:
+            trend_s = f"[bad]↓ {delta:.2f} ⚠[/]"
+        else:
+            trend_s = f"[muted]→  {delta:+.2f}[/]"
+        t.add_row(task[:40], str(len(window)), spark, trend_s)
+
+    ui.console.print()
+    ui.console.print(t)
+    ui.console.print()
