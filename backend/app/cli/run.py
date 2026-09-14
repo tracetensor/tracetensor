@@ -87,6 +87,13 @@ def run(
     token: Optional[str] = typer.Option(
         None, "--token", envvar="TRACETENSOR_TOKEN", help="API token for the server (if secured)."
     ),
+    timeout_scale: float = typer.Option(
+        1.0,
+        "--timeout-scale",
+        min=0.1,
+        max=100.0,
+        help="Multiply agent + verifier timeouts (e.g. 2.0 for harder tasks, 0.5 for quick smoke tests).",
+    ),
     json_out: bool = typer.Option(False, "--json", help="Machine-readable JSON (for CI/scripts)."),
     verbose: bool = typer.Option(
         False, "--verbose", help="Emit structured JSON logs to stdout (for debugging)."
@@ -124,11 +131,14 @@ def run(
         try:
             parsed_cfg = parse_task_toml(tpath.read_bytes(), task_dir)
             name = parsed_cfg.name or name
-            agent_to = parsed_cfg.agent.timeout_sec or 120.0
-            verifier_to = parsed_cfg.verifier.timeout_sec or 120.0
+            agent_to = (parsed_cfg.agent.timeout_sec or 120.0) * timeout_scale
+            verifier_to = (parsed_cfg.verifier.timeout_sec or 120.0) * timeout_scale
         except TaskParseError as e:
             ui.error(f"Bad task.toml: {e}")
             raise typer.Exit(2) from e
+    elif timeout_scale != 1.0:
+        agent_to *= timeout_scale
+        verifier_to *= timeout_scale
 
     try:
         resolve_agent(agent, model, settings)
