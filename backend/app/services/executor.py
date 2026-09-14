@@ -30,7 +30,7 @@ from app.core.logging import get_logger
 from app.models.enums import JobStatus
 from app.models.job import Job, Trial
 from app.models.task import Task
-from app.services import job_queue
+from app.services import diagnose, job_queue
 from app.services.event_bus import JobBus, create_bus, get_bus
 from app.services.trial_runner import prebuild, run_trial
 
@@ -77,6 +77,7 @@ async def execute_job(SessionLocal: async_sessionmaker, job_id: uuid.UUID) -> No
             run_id = job.dataset_run_id
             task_name = task.name
             agent, model, n_trials = job.agent, job.model, job.n_trials
+            backend = job.backend or "docker"
             task_id = job.task_id
             task_dir_str = task.task_dir
             concurrency = min(job.concurrency or 4, n_trials or 1)
@@ -91,13 +92,13 @@ async def execute_job(SessionLocal: async_sessionmaker, job_id: uuid.UUID) -> No
                 "type": "job_started",
                 "agent": agent,
                 "model": model,
-                "backend": "docker",
+                "backend": backend,
                 "n_trials": n_trials,
                 "concurrency": concurrency,
             }
         )
         if concurrency > 1:
-            await asyncio.to_thread(prebuild, Path(task_dir_str), "docker")
+            await asyncio.to_thread(prebuild, Path(task_dir_str), backend)
 
         passed = 0
         scored = 0
@@ -119,17 +120,37 @@ async def execute_job(SessionLocal: async_sessionmaker, job_id: uuid.UUID) -> No
                     instruction=instruction,
                     agent_name=agent,
                     model=model,
-                    backend="docker",
+                    backend=backend,
                     agent_timeout=timeout_agent,
                     verifier_timeout=timeout_verifier,
                     on_event=_tag,
                 )
+            # Diagnose, rules tier: pure-function classification of why the
+            # trial failed (docs/DIAGNOSE.md). Free and offline, so it runs
+            # inline before the write — one insert carries the analysis. The
+            # LLM tier runs after trial_done, never on this path.
+            if settings.DIAGNOSE_ENABLED:
+                trial_dict = {
+                    "status": outcome.status,
+                    "passed": outcome.passed,
+                    "reward": outcome.reward,
+                    "error": outcome.error,
+                    "trajectory": outcome.trajectory or {},
+                }
+                analysis = diagnose.diagnose_trial(
+                    trial_dict,
+                    max_steps=settings.LLM_AGENT_MAX_STEPS,
+                    cost_limit_usd=settings.AGENT_COST_LIMIT_USD,
+                )
+                outcome.trajectory = {**(outcome.trajectory or {}), "failure_analysis": analysis}
+
+            trial_id = uuid.uuid4()
             # Short-lived session per trial write — released immediately.
             async with db_lock:
                 async with SessionLocal() as db:
                     db.add(
                         Trial(
-                            id=uuid.uuid4(),
+                            id=trial_id,
                             job_id=job_id,
                             task_id=task_id,
                             trial_num=i,
@@ -165,6 +186,56 @@ async def execute_job(SessionLocal: async_sessionmaker, job_id: uuid.UUID) -> No
                     "warnings": outcome.warnings,
                 }
             )
+
+            # Diagnose, LLM tier (opt-in — it spends money). Runs strictly
+            # after trial_done so the trial result is never delayed, outside
+            # the trial semaphore so it never holds a sandbox slot. Failures
+            # here only log; a broken diagnosis must not fail a recorded trial.
+            if settings.DIAGNOSE_ENABLED and settings.DIAGNOSE_LLM_ENABLED:
+                try:
+                    from app.services import diagnose_llm
+
+                    trial_dict = {
+                        "status": outcome.status,
+                        "passed": outcome.passed,
+                        "reward": outcome.reward,
+                        "error": outcome.error,
+                        "trajectory": outcome.trajectory or {},
+                    }
+                    analysis = await asyncio.to_thread(
+                        diagnose_llm.diagnose_trial_full,
+                        trial_dict,
+                        instruction,
+                        model_spec=settings.DIAGNOSE_MODEL,
+                        max_steps=settings.LLM_AGENT_MAX_STEPS,
+                        cost_limit_usd=settings.AGENT_COST_LIMIT_USD,
+                    )
+                    async with db_lock:
+                        async with SessionLocal() as db:
+                            row = (
+                                await db.execute(select(Trial).where(Trial.id == trial_id))
+                            ).scalar_one()
+                            row.trajectory = {
+                                **(row.trajectory or {}),
+                                "failure_analysis": analysis,
+                            }
+                            await db.commit()
+                except Exception as e:  # noqa: BLE001 — diagnosis is best-effort
+                    log.warning("diagnose_llm_failed", extra={"trial": i, "error": str(e)[:200]})
+                    # The rules block was already persisted inline — report that.
+                    analysis = (outcome.trajectory or {}).get("failure_analysis")
+            else:
+                analysis = (outcome.trajectory or {}).get("failure_analysis")
+            if analysis:
+                emit(
+                    {
+                        "type": "diagnose",
+                        "trial_num": i,
+                        "primary": analysis.get("primary"),
+                        "occurrence_count": len(analysis.get("occurrences") or []),
+                        "engine": analysis.get("engine", "rules"),
+                    }
+                )
 
         await asyncio.gather(*[_one(i) for i in range(n_trials)])
 

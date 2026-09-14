@@ -117,7 +117,12 @@ def resolve_agent(name: str, model: Optional[str], settings: object) -> tuple[st
     raise AgentConfigError(f"Unknown agent: {name}")
 
 
-def make_agent(name: str, task_dir: Path, model: Optional[str] = None) -> BaseAgent:
+def make_agent(
+    name: str,
+    task_dir: Path,
+    model: Optional[str] = None,
+    max_steps: Optional[int] = None,
+) -> BaseAgent:
     """Build an agent. `name` is one of:
 
     - a registered agent   oracle / mini-swe|mini / claude-code|cc / codex — see registry.AGENTS
@@ -136,7 +141,7 @@ def make_agent(name: str, task_dir: Path, model: Optional[str] = None) -> BaseAg
     if provider in llm.PROVIDERS:
         from app.services.agents.llm_agent import LLMAgent
 
-        return LLMAgent(provider=provider, model=model)
+        return LLMAgent(provider=provider, model=model, max_steps=max_steps)
     raise ValueError(f"Unknown agent: {name}")
 
 

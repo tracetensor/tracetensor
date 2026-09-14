@@ -13,6 +13,7 @@ import typer
 from rich.table import Table
 
 from app.cli import console as ui
+from app.services import diagnose as diagnose_svc
 from app.services import vault as vault_svc
 from app.services.cost import cost_enabled
 
@@ -265,3 +266,114 @@ def export_cmd(
         ui.error(str(e))
         raise typer.Exit(2) from e
     ui.hint(f"exported → {dest}")
+
+
+@vault_app.command("diagnose")
+def diagnose_cmd(
+    run_id: Optional[str] = typer.Argument(
+        None, help="Local run directory name/path. Omit to diagnose every local run."
+    ),
+    runs: Path = typer.Option(Path("runs"), "--runs", help="Local runs directory."),
+    max_steps: Optional[int] = typer.Option(
+        None,
+        "--max-steps",
+        help="The step budget the run used (LLM_AGENT_MAX_STEPS at run time). "
+        "Makes budget-exhaustion definitive instead of inferred.",
+    ),
+    write: bool = typer.Option(
+        False,
+        "--write",
+        help="Persist each trial's failure_analysis back into result.json.",
+    ),
+    use_llm: bool = typer.Option(
+        False,
+        "--llm",
+        help="Also run the LLM extractor on each trial (COSTS a model call per "
+        "trial — needs a provider API key; see DIAGNOSE_MODEL).",
+    ),
+    llm_model: Optional[str] = typer.Option(
+        None, "--llm-model", help="provider/model for --llm (default openai/gpt-4.1-mini)."
+    ),
+) -> None:
+    """Explain WHY trials failed (rules are free; --llm adds a paid extraction pass)."""
+    ui.banner()
+    if run_id:
+        try:
+            dirs = [vault_svc.resolve_local_run(runs, run_id)]
+        except FileNotFoundError as e:
+            ui.error(str(e))
+            raise typer.Exit(2) from e
+    else:
+        dirs = [Path(r["path"]) for r in vault_svc.list_local_runs(runs)]
+        if not dirs:
+            ui.hint(f"No runs under {runs}/.")
+            return
+
+    for run_dir in dirs:
+        try:
+            data = vault_svc.load_local_run(run_dir)
+        except FileNotFoundError as e:
+            ui.error(str(e))
+            continue
+        if use_llm:
+            from app.services import diagnose_llm
+
+            # Best-effort instruction lookup: `tracetensor run` names runs
+            # after the task path, so try tasks/<name>/instruction.md from cwd.
+            instruction = ""
+            task_name = str(data.get("task") or "")
+            for base in (Path("tasks"), Path("../tasks")):
+                cand = base / task_name / "instruction.md"
+                if cand.is_file():
+                    instruction = cand.read_text(encoding="utf-8", errors="replace")
+                    break
+            analyses = [
+                diagnose_llm.diagnose_trial_full(
+                    t, instruction, model_spec=llm_model, max_steps=max_steps
+                )
+                for t in (data.get("trials") or [])
+                if isinstance(t, dict)
+            ]
+        else:
+            analyses = diagnose_svc.diagnose_result(data, max_steps=max_steps)
+        agent_s = str(data.get("agent") or "")
+        if data.get("model"):
+            agent_s += f" · {data['model']}"
+        ui.console.print()
+        ui.console.print(
+            f"[bold]{run_dir.name}[/bold]  [muted]{data.get('task')}  {agent_s}[/muted]"
+        )
+        trials = data.get("trials") or []
+        for t, fa in zip(trials, analyses):
+            n = t.get("n", t.get("trial_num", 0))
+            mark = "[ok]pass[/ok]" if t.get("passed") else "[bad]FAIL[/bad]"
+            if not fa["occurrences"]:
+                ui.console.print(f"  trial {n}  {mark}  [muted]no findings[/muted]")
+                continue
+            ui.console.print(f"  trial {n}  {mark}")
+            for occ in fa["occurrences"]:
+                ev = occ["evidence_steps"]
+                ev_s = f"  [muted]steps {ev[0]}–{ev[-1]}[/muted]" if ev else ""
+                det = "  [muted](llm)[/muted]" if occ.get("detector") == "llm" else ""
+                ui.console.print(
+                    f"    [warn]{occ['failure_class']}[/warn]  {occ['title']}{ev_s}{det}"
+                )
+                ui.console.print(f"      [muted]{occ['rationale']}[/muted]")
+            if fa.get("llm_call"):
+                cost = vault_svc.format_cost((fa["llm_call"] or {}).get("cost_usd"))
+                ui.console.print(
+                    f"      [muted]llm: {fa['llm_call'].get('provider')}/"
+                    f"{fa['llm_call'].get('model')}  cost {cost}[/muted]"
+                )
+            if fa.get("llm_error"):
+                ui.console.print(f"      [warn]llm: {fa['llm_error']}[/warn]")
+        if write:
+            for t, fa in zip(trials, analyses):
+                traj = t.setdefault("trajectory", {})
+                traj["failure_analysis"] = fa
+            import json as _json
+
+            (run_dir / "result.json").write_text(
+                _json.dumps(data, indent=2, default=str), encoding="utf-8"
+            )
+            ui.hint(f"failure_analysis written → {run_dir / 'result.json'}")

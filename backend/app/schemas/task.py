@@ -63,6 +63,7 @@ class AgentConfig(BaseModel):
     network_mode: Optional[str] = None  # phase override
     allowed_hosts: list[str] = Field(default_factory=list)
     user: Optional[str] = None
+    max_steps: Optional[int] = None  # per-task step budget for built-in LLM agent
 
 
 class EnvironmentConfig(BaseModel):

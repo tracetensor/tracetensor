@@ -31,118 +31,22 @@ SECURITY NOTE — Docker socket and image trust:
 
 from __future__ import annotations
 
-import abc
 import subprocess
 import time
-from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
-
-@dataclass
-class ExecResult:
-    command: str
-    exit_code: int
-    stdout: str
-    stderr: str
-    duration_s: float
-    # Free-form label for the trajectory (e.g. "agent", "verifier").
-    phase: str = "agent"
-
-    def to_step(self) -> dict:
-        return {
-            "phase": self.phase,
-            "command": self.command,
-            "exit_code": self.exit_code,
-            "stdout": self.stdout[-8000:],  # cap to keep records sane
-            "stderr": self.stderr[-4000:],
-            "duration_s": round(self.duration_s, 3),
-        }
-
-
-class BaseEnvironment(abc.ABC):
-    """Uniform room interface — the plug-in contract for an execution backend.
-
-    A backend is constructed as `Backend(task_dir, **kwargs)` (kwargs are the
-    task's environment config: docker_image, network_mode, cpus, workdir, …) and
-    implements the full lifecycle:
-        build → setup → exec/read_file/write_file/copy_in/set_network/
-        transfer_from → teardown
-    Register one with app.services.environment.register_environment(name, cls)
-    and it's selectable everywhere via make_environment(backend=name, …).
-
-    These are real abstract methods. They used to be empty bodies (`...`), which
-    meant a backend that forgot `exec` returned None from every command: the
-    agent appeared to run, produced no steps, and scored 0.0 — identical to an
-    agent that genuinely failed. Now that mistake is a TypeError at construction,
-    naming the missing method.
-    """
-
-    @abc.abstractmethod
-    def __init__(self, task_dir: Path, **kwargs: object) -> None: ...
-
-    @abc.abstractmethod
-    def build(self) -> None:
-        """Prepare the image. Idempotent — trials share a per-task image tag."""
-
-    @abc.abstractmethod
-    def setup(self) -> None:
-        """Start the room and stage the task's files into it."""
-
-    @abc.abstractmethod
-    def exec(
-        self,
-        command: str,
-        phase: str = "agent",
-        timeout: float | None = None,
-        as_user: str | None = None,
-        env: dict | None = None,
-    ) -> ExecResult:
-        """Run one command inside the room and record what it did.
-
-        Must return an ExecResult even when the command fails — a nonzero exit is
-        ordinary data here, not an error to raise on.
-        """
-
-    @abc.abstractmethod
-    def read_file(self, path: str) -> str | None:
-        """Read a file from inside the room; None when it doesn't exist."""
-
-    @abc.abstractmethod
-    def write_file(self, path: str, content: bytes) -> None: ...
-
-    @abc.abstractmethod
-    def copy_in(self, src_dir: Path, dest: str) -> None: ...
-
-    @abc.abstractmethod
-    def set_network(self, mode: str | None) -> None:
-        """Apply a phase's network policy (public / no-network). Called between
-        phases, so a task can grant the agent egress and deny it to the verifier.
-        A backend that cannot enforce isolation must raise rather than silently
-        run with more access than the task asked for."""
-
-    @abc.abstractmethod
-    def transfer_from(self, other: "BaseEnvironment", paths: list[str]) -> list[str]:
-        """Copy paths from another room into this one; return the ones that were
-        absent at the source so the caller can warn instead of scoring a silent 0."""
-
-    @abc.abstractmethod
-    def teardown(self) -> None:
-        """Release the room. Called from a `finally` — must not raise."""
-
+# Re-exported so `from app.services.environment import BaseEnvironment, …`
+# keeps working everywhere — the base contract lives in environment_base.
+from app.services.environment_base import (  # noqa: F401
+    STD_DIRS,
+    BaseEnvironment,
+    ExecResult,
+)
 
 # ----------------------------------------------------------------------
 # Docker environment (production)
 # ----------------------------------------------------------------------
-# Standard container paths (linux).
-STD_DIRS = [
-    "/data",
-    "/app",
-    "/tests",
-    "/solution",
-    "/logs/agent",
-    "/logs/artifacts",
-    "/logs/verifier",
-]
 
 
 class DockerEnvironment(BaseEnvironment):
@@ -219,13 +123,12 @@ class DockerEnvironment(BaseEnvironment):
             return ["--network", "none"]
         if self.network_mode == "public":
             return []  # default bridge = full egress
-        # allowlist: needs an egress-control sidecar (nftables). Not built yet —
-        # reject the trial rather than silently run with a weaker policy.
-        raise RuntimeError(
-            "network_mode 'allowlist' requires an egress-control sidecar that "
-            "TraceTensor doesn't implement yet. Use 'public' or 'no-network', "
-            "or run this task on a provider that supports allowlist."
-        )
+        if self.network_mode == "allowlist":
+            # Bridge network is used; iptables rules are applied in _apply_allowlist_rules()
+            # after the container starts. NET_ADMIN capability is added unconditionally
+            # in setup() so it is always available for phase switching.
+            return []
+        raise RuntimeError(f"Unknown network_mode: {self.network_mode!r}")
 
     def _resource_args(self) -> list[str]:
         args: list[str] = []
@@ -252,6 +155,32 @@ class DockerEnvironment(BaseEnvironment):
                 "using_remote_image",
                 extra={"image": self.docker_image},
             )
+            pull_args = [self._CLI, "pull"]
+            if self.platform:
+                pull_args += ["--platform", self.platform]
+            pull_args.append(self.docker_image)
+            pull = self._run(pull_args, timeout=self.build_timeout)
+            if pull.returncode != 0:
+                hint = ""
+                err = (pull.stderr or pull.stdout or "").lower()
+                if "manifest" in err or "platform" in err:
+                    hint = (
+                        "\nHint: amd64-only images on Apple Silicon need "
+                        '[environment].platform = "linux/amd64" in task.toml or '
+                        "tracetensor run --platform linux/amd64."
+                    )
+                elif "not found" in err or "repository does not exist" in err:
+                    has_dockerfile = (self.task_dir / self.dockerfile_dir / "Dockerfile").exists()
+                    if has_dockerfile:
+                        hint = (
+                            f"\nHint: docker_image = {self.docker_image!r} tells TraceTensor to "
+                            "pull from a registry instead of building from environment/Dockerfile. "
+                            "Remove docker_image from task.toml to build locally."
+                        )
+                raise RuntimeError(
+                    f"docker pull failed for {self.docker_image!r}:\n"
+                    f"{pull.stderr[-2000:]}{hint}"
+                )
             return
         if self.image_prebuilt:
             return
@@ -275,8 +204,13 @@ class DockerEnvironment(BaseEnvironment):
         run_args = [self._CLI, "run", "-d", "--rm"]
         if self.platform:  # e.g. run an x86 SWE-Bench image on arm64 via emulation
             run_args += ["--platform", self.platform]
-        run_args += self._network_args()  # may raise on allowlist
+        run_args += self._network_args()
         run_args += self._resource_args()
+        # NET_ADMIN lets iptables manage egress rules inside the container.
+        # Required for allowlist mode — added unconditionally so a no-network
+        # container that later switches to allowlist (via agent phase override)
+        # already has the capability at startup time.
+        run_args += ["--cap-add", "NET_ADMIN"]
         for k, v in self.env.items():  # environment variables
             # M-4: reject keys that aren't valid POSIX variable names — a key
             # containing '=' or newlines corrupts the -e parsing; an invalid key
@@ -309,6 +243,85 @@ class DockerEnvironment(BaseEnvironment):
             [self._CLI, "exec", "-u", "0", self._cid, "chmod", "0777"]
             + ["/logs/agent", "/logs/artifacts"]
         )
+
+        # For allowlist mode, apply iptables egress rules now that the container
+        # is running. Resolves allowed hostnames on the HOST (before any rules)
+        # and injects per-IP ACCEPT rules, then drops everything else.
+        if self.network_mode == "allowlist":
+            self._apply_allowlist_rules(self.allowed_hosts)
+
+    def _apply_allowlist_rules(self, allowed_hosts: list[str]) -> None:
+        """Enforce egress allowlist inside the container using iptables.
+
+        Resolves each allowed hostname to its current IP(s) on the HOST (before
+        any rules are in place), then injects iptables OUTPUT rules that ACCEPT
+        only those IPs plus loopback, established connections, and DNS. Everything
+        else is DROPped. Requires NET_ADMIN — ensured by _network_args() when
+        network_mode == 'allowlist'.
+
+        Best-effort: logs a warning if iptables is unavailable in the image
+        rather than failing the whole trial, so tasks still run (with full egress)
+        and the operator sees a clear warning.
+        """
+        import logging
+        import socket
+
+        log = logging.getLogger("tracetensor.environment")
+
+        # Resolve hostnames → IPs on the host (unaffected by container rules).
+        allowed_ips: set[str] = set()
+        for host in allowed_hosts:
+            host = host.lstrip("*.")  # strip wildcard prefix for resolution
+            try:
+                for _, _, _, _, addr in socket.getaddrinfo(host, None):
+                    ip = addr[0]
+                    if ":" not in ip:  # IPv4 only for now
+                        allowed_ips.add(ip)
+            except Exception as exc:
+                log.warning("allowlist_resolve_failed", extra={"host": host, "error": str(exc)})
+
+        if not allowed_ips and allowed_hosts:
+            log.warning("allowlist_no_ips_resolved", extra={"hosts": allowed_hosts})
+
+        # Build a single shell command: install iptables if absent, then set rules.
+        accept_rules = "".join(
+            f"iptables -A OUTPUT -d {ip} -j ACCEPT && " for ip in sorted(allowed_ips)
+        )
+        # Try to use iptables directly; only install if needed (saves ~30s when pre-installed)
+        rules_cmd = (
+            "which iptables >/dev/null 2>&1 || ("
+            "apt-get update -qq 2>/dev/null && "
+            "apt-get install -yq iptables 2>/dev/null || true) && "
+            # Allow loopback
+            "iptables -A OUTPUT -o lo -j ACCEPT && "
+            # Allow already-established connections (responses to initiated traffic)
+            "iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT && "
+            # Allow DNS so hostname resolution works inside the container
+            "iptables -A OUTPUT -p udp --dport 53 -j ACCEPT && "
+            "iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT && "
+            # Allow each resolved allowed IP
+            + accept_rules +
+            # Drop everything else
+            "iptables -P OUTPUT DROP"
+        )
+
+        result = self._run(
+            [self._CLI, "exec", "-u", "0", self._cid, "bash", "-c", rules_cmd]
+        )
+        if result.returncode != 0:
+            log.warning(
+                "allowlist_iptables_failed",
+                extra={
+                    "returncode": result.returncode,
+                    "stderr": (result.stderr or "")[:300],
+                    "note": "Container running with FULL egress — allowlist not enforced",
+                },
+            )
+        else:
+            log.info(
+                "allowlist_applied",
+                extra={"allowed_hosts": allowed_hosts, "resolved_ips": sorted(allowed_ips)},
+            )
 
     def exec(
         self,
@@ -375,26 +388,80 @@ class DockerEnvironment(BaseEnvironment):
             if tmp and os.path.exists(tmp):
                 os.remove(tmp)
 
-    def copy_in(self, src_dir: Path, dest: str) -> None:
-        self._run([self._CLI, "exec", "-u", "0", self._cid, "mkdir", "-p", dest])
-        for f in src_dir.iterdir():
-            if f.is_file():
-                self._run([self._CLI, "cp", str(f), f"{self._cid}:{dest}/{f.name}"])
+    @classmethod
+    def capabilities(cls):
+        from app.services.backend_capabilities import BackendCapabilities
 
-    def set_network(self, mode: str | None) -> None:
+        return BackendCapabilities(
+            network_isolation=True,  # --network none
+            # allowlist needs the egress-control sidecar that _network_args
+            # rejects; claimed only when that exists.
+            network_allowlist=False,
+            dynamic_network=True,  # network connect/disconnect on a live container
+            separate_verifier=True,  # docker cp between containers
+        )
+
+    def copy_in(self, src_dir: Path, dest: str) -> None:
+        """Copy the CONTENTS of src_dir into dest, recursively.
+
+        The trailing `/.` is what makes this the directory's contents rather than
+        the directory itself, matching the old per-file loop's layout. That loop
+        also filtered to `is_file()`, so any subdirectory was skipped without a
+        word — a nested agent project or task fixture arrived half-copied and the
+        failure surfaced much later as a missing import. Daytona's copy_in has
+        always been recursive (it walks with rglob), so this also removes a
+        behaviour difference between the two backends.
+        """
+        if not src_dir.is_dir():
+            raise RuntimeError(f"copy_in source is not a directory: {src_dir}")
+        self._run([self._CLI, "exec", "-u", "0", self._cid, "mkdir", "-p", dest])
+        proc = self._run([self._CLI, "cp", f"{src_dir}/.", f"{self._cid}:{dest}"])
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "").strip()[:300]
+            raise RuntimeError(f"Failed to copy {src_dir} into the container at {dest}: {detail}")
+
+    def set_network(self, mode: str | None, allowed_hosts: list[str] | None = None) -> None:
         """Switch the running container's network for a phase override.
 
         Supports public<->no-network via docker network connect/disconnect.
-        `allowlist` phase overrides need the egress sidecar → rejected.
+        Supports switching to `allowlist` by connecting to bridge then applying
+        iptables rules. Switching FROM allowlist back to no-network clears the
+        bridge connection.
+
+        `allowed_hosts` overrides self.allowed_hosts when switching to allowlist
+        mode — use this to pass per-phase allowed_hosts from task.toml [agent].
         """
         if mode is None or mode == self.network_mode:
             return
-        if mode == "allowlist":
-            raise RuntimeError("allowlist network phase override is not supported yet.")
         if mode == "no-network":
-            self._run([self._CLI, "network", "disconnect", "bridge", self._cid])
+            proc = self._run([self._CLI, "network", "disconnect", "bridge", self._cid])
         elif mode == "public":
-            self._run([self._CLI, "network", "connect", "bridge", self._cid])
+            # A container started with `--network none` is attached to the `none`
+            # network, and the daemon refuses to add a second network while that
+            # attachment stands ("cannot be connected to multiple networks with
+            # one of the networks in private (none) mode"). Detach it first. This
+            # is a no-op — and a harmless non-zero exit — when the container was
+            # started on bridge and later disconnected, so its result is ignored;
+            # only the connect below decides success.
+            self._run([self._CLI, "network", "disconnect", "none", self._cid])
+            proc = self._run([self._CLI, "network", "connect", "bridge", self._cid])
+        elif mode == "allowlist":
+            # Connect to bridge first (same as public), then apply iptables rules.
+            # Use the phase-specific allowed_hosts if provided, else fall back to
+            # the container-level self.allowed_hosts set at construction time.
+            self._run([self._CLI, "network", "disconnect", "none", self._cid])
+            proc = self._run([self._CLI, "network", "connect", "bridge", self._cid])
+            if proc.returncode == 0:
+                self.network_mode = mode
+                self._apply_allowlist_rules(allowed_hosts if allowed_hosts is not None else self.allowed_hosts)
+                return
+        else:
+            raise RuntimeError(f"Unknown network mode: {mode}")
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "").strip()[:300]
+            raise RuntimeError(
+                f"Failed to switch container network from {self.network_mode!r} to {mode!r}: {detail}"
+            )
         self.network_mode = mode
 
     def transfer_from(self, other: "BaseEnvironment", paths: list[str]) -> list[str]:
@@ -435,6 +502,18 @@ class DockerEnvironment(BaseEnvironment):
             self._run([self._CLI, "kill", self.container_id])
             self.container_id = None
 
+    def execution_metadata(self) -> dict:
+        meta: dict = {"network_mode": self.network_mode}
+        if self.container_id:
+            meta["container_id"] = self.container_id
+        if self.image_tag:
+            meta["image"] = self.image_tag
+        if self.docker_image:
+            meta["docker_image"] = self.docker_image
+        if self.platform:
+            meta["platform"] = self.platform
+        return meta
+
 
 class PodmanEnvironment(DockerEnvironment):
     """Podman is a drop-in, daemonless, rootless-capable Docker CLI — so the whole
@@ -460,6 +539,11 @@ _BACKENDS: dict[str, type[BaseEnvironment]] = {
 }
 
 
+#: Backends whose module is imported the first time one is actually built.
+#: Keyed the same as _BACKENDS; the resolved class is promoted into _BACKENDS.
+_LAZY_BACKENDS: dict[str, Callable[[], type[BaseEnvironment]]] = {}
+
+
 def register_environment(name: str, cls: type[BaseEnvironment]) -> None:
     """Register a custom environment backend under `name` (idempotent overwrite)."""
     if not issubclass(cls, BaseEnvironment):
@@ -467,17 +551,49 @@ def register_environment(name: str, cls: type[BaseEnvironment]) -> None:
     _BACKENDS[name] = cls
 
 
+def register_environment_lazy(name: str, loader: Callable[[], type[BaseEnvironment]]) -> None:
+    """Register a backend by a loader that imports its class on first use.
+
+    For backends whose module is expensive or circular to import at registration
+    time — a cloud adapter pulling in an optional vendor SDK, or one that imports
+    this module itself. Eagerly importing Daytona here meant `import
+    daytona_environment` before `backend_catalog` raised ImportError on a
+    partially initialised module; only the import order made it work.
+
+    The backend still appears in `available_backends()` before its first use, so
+    catalogs and `--backend` validation behave identically to an eager one.
+    """
+    _LAZY_BACKENDS[name] = loader
+
+
+def _resolve_backend(name: str) -> type[BaseEnvironment] | None:
+    cls = _BACKENDS.get(name)
+    if cls is not None:
+        return cls
+    loader = _LAZY_BACKENDS.get(name)
+    if loader is None:
+        return None
+    cls = loader()
+    if not isinstance(cls, type) or not issubclass(cls, BaseEnvironment):
+        raise TypeError(f"Lazy backend {name!r} loaded {cls!r}, which is not a BaseEnvironment.")
+    _BACKENDS[name] = cls  # promote so the import happens once
+    return cls
+
+
 def available_backends() -> list[str]:
-    return sorted(_BACKENDS)
+    return sorted(set(_BACKENDS) | set(_LAZY_BACKENDS))
 
 
 def make_environment(backend: str, task_dir: Path, **kwargs: object) -> BaseEnvironment:
     """Factory. Resolves `backend` through the plug-in registry (see
     register_environment). Docker is the default, real-isolation backend; Podman
     ships as a drop-in alternative."""
-    cls = _BACKENDS.get(backend)
+    cls = _resolve_backend(backend)
     if cls is None:
         raise ValueError(
             f"Unsupported backend '{backend}'. Available: {', '.join(available_backends())}."
         )
     return cls(task_dir, **kwargs)
+
+
+from app.services import backend_catalog as _backend_catalog  # noqa: E402,F401 — register cloud stubs

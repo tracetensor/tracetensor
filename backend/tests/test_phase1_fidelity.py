@@ -88,7 +88,8 @@ check("network public -> reachable", pub.get("net") == "Y")
 check("network no-network -> blocked", none.get("net") == "N")
 check("memory_mb=256 -> 256MB limit", res.get("mem") == str(256 * 1024 * 1024))
 check("workdir honored", wd.get("pwd") == "/work")
-check("allowlist -> rejected at setup", "rejected" in allow)
+# allowlist is now fully implemented: setup succeeds and applies iptables rules
+check("allowlist -> setup succeeds (not rejected)", "rejected" not in allow)
 
 print("\n== Isolated verifier (environment_mode = separate) ==")
 td = _mk_task()

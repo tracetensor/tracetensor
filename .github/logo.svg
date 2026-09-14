@@ -1,14 +1,15 @@
-<svg width="200" height="200" viewBox="0 0 200 200" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <!-- Black background -->
-  <rect width="200" height="200" fill="#000000"/>
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <rect width="256" height="256" fill="#000000"/>
 
-  <!-- Triangle (left side) -->
-  <path d="M 40 160 L 100 40 L 40 40 Z" stroke="white" stroke-width="12" fill="none" stroke-linejoin="round" stroke-linecap="round"/>
+  <!-- Triangle (rounded) -->
+  <path d="M 45 200 L 128 50 L 211 200 C 211 208 204 215 196 215 L 60 215 C 52 215 45 208 45 200 Z"
+        stroke="white" stroke-width="16" fill="none" stroke-linejoin="round" stroke-linecap="round"/>
 
-  <!-- Circle (right side) -->
-  <circle cx="140" cy="100" r="45" stroke="white" stroke-width="12" fill="none"/>
+  <!-- Circle -->
+  <circle cx="160" cy="120" r="65" stroke="white" stroke-width="16" fill="none" stroke-linecap="round"/>
 
   <!-- X inside circle -->
-  <line x1="110" y1="70" x2="170" y2="130" stroke="white" stroke-width="12" stroke-linecap="round"/>
-  <line x1="170" y1="70" x2="110" y2="130" stroke="white" stroke-width="12" stroke-linecap="round"/>
+  <line x1="120" y1="80" x2="200" y2="160" stroke="white" stroke-width="18" stroke-linecap="round"/>
+  <line x1="200" y1="80" x2="120" y2="160" stroke="white" stroke-width="18" stroke-linecap="round"/>
 </svg>
