@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Optional
 
 import typer
+from rich.table import Table
 
 from app.cli import console as ui
 
