@@ -32,6 +32,7 @@ from app.schemas.task import (
     AgentConfig,
     Author,
     EnvironmentConfig,
+    StepConfig,
     TaskConfig,
     VerifierConfig,
 )
@@ -171,6 +172,29 @@ def parse_task_toml(content: bytes, task_dir: Path | None = None) -> TaskConfig:
             "(pass task_dir for legacy Terminal-Bench tasks)"
         )
 
+    # Multi-step: prefer explicit [[steps]] in task.toml; fall back to auto-
+    # detecting a steps/ directory whose sorted subdirs each contain an
+    # instruction.md (or instruction_file) and a tests/ directory.
+    steps: list[StepConfig] = []
+    raw_steps = raw.get("steps", [])
+    if raw_steps:
+        for s in raw_steps:
+            try:
+                steps.append(StepConfig(**s))
+            except Exception as e:
+                raise TaskParseError(f"[[steps]] entry has invalid values: {e}") from e
+    elif task_dir is not None:
+        steps_dir = task_dir / "steps"
+        if steps_dir.is_dir():
+            for sd in sorted(d for d in steps_dir.iterdir() if d.is_dir()):
+                instr = sd / "instruction.md"
+                tests = sd / "tests"
+                if instr.exists() and tests.is_dir():
+                    steps.append(StepConfig(
+                        instruction_file=str(instr.relative_to(task_dir)),
+                        tests_dir=str(tests.relative_to(task_dir)),
+                    ))
+
     try:
         return TaskConfig(
             schema_version=str(raw.get("schema_version", "1.3")),
@@ -184,6 +208,7 @@ def parse_task_toml(content: bytes, task_dir: Path | None = None) -> TaskConfig:
             agent=AgentConfig(**agent),
             environment=EnvironmentConfig(**environment),
             artifacts=list(raw.get("artifacts", [])),
+            steps=steps,
             metadata=metadata,
         )
     except Exception as e:  # pydantic ValidationError etc.
