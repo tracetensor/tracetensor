@@ -1,8 +1,0 @@
-{
-  "id": "task-version-uuid-001",
-  "archive_path": "orca-bench/032b3bef243e177f/latest/task.tar.gz",
-  "content_hash": "abc123deadbeef",
-  "revision": 1,
-  "yanked_at": null,
-  "yanked_reason": null
-}
