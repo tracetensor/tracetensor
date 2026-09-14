@@ -155,3 +155,66 @@ def validate(
     raise typer.Exit(0 if ready else 1)
 
 
+@tasks_app.command("new")
+def new_cmd(
+    out: Path = typer.Option(Path("tasks"), "-o", "--out", help="Directory to write the task into."),
+    yes: bool = typer.Option(False, "-y", "--yes", help="Non-interactive — use defaults."),
+) -> None:
+    """Interactively create a new LLM-judge task (no Dockerfile needed)."""
+    import re
+
+    def _slug(s: str) -> str:
+        return re.sub(r"[^a-z0-9-]", "-", s.lower().strip()).strip("-")
+
+    if yes:
+        slug = "my-task"
+        description = "Complete the task described in the instructions."
+        criteria: list[str] = ["The output is correct and complete."]
+        judge_model = "openai/gpt-4.1-mini"
+    else:
+        ui.banner()
+        raw_name = typer.prompt("Task name (slug, e.g. summarize-article)")
+        slug = _slug(raw_name) or "my-task"
+        description = typer.prompt("What should the agent do?")
+        criteria = []
+        for i in range(1, 4):
+            c = typer.prompt(f"Scoring criterion {i} (press Enter to skip)", default="")
+            if not c:
+                break
+            criteria.append(c)
+        if not criteria:
+            criteria = ["The output is correct and complete."]
+        judge_model = typer.prompt("Judge model", default="openai/gpt-4.1-mini")
+
+    task_dir = out / slug
+    task_dir.mkdir(parents=True, exist_ok=True)
+
+    rubric = "\n".join(f"- {c}" for c in criteria)
+
+    (task_dir / "instruction.md").write_text(
+        f"# {slug}\n\n{description}\n", encoding="utf-8"
+    )
+    (task_dir / "task.toml").write_text(
+        f'schema_version = "1.3"\n\n'
+        f"[task]\n"
+        f'name = "{slug}"\n'
+        f'description = "{description[:80]}"\n\n'
+        f"[environment]\n"
+        f'docker_image = "python:3.11-slim"\n'
+        f'network_mode = "no-network"\n\n'
+        f"[agent]\n"
+        f"timeout_sec = 120.0\n\n"
+        f"[verifier]\n"
+        f'type = "llm-judge"\n'
+        f'judge_model = "{judge_model}"\n'
+        f'rubric = """\n{rubric}\n"""\n',
+        encoding="utf-8",
+    )
+
+    ui.banner()
+    ui.console.print(f"[ok]✓ Created[/] [val]{task_dir}[/]")
+    ui.hint(f"  tracetensor tasks validate {task_dir}")
+    ui.hint(f"  tracetensor run {task_dir} -a oracle")
+    ui.hint(f"  tracetensor run {task_dir} -a claude-code -m claude-sonnet-4-5")
+
+
