@@ -79,7 +79,6 @@ _PYTEST_NATIVE = {
     "test_environment_registry.py",
     "test_frontend_contract.py",
     "test_frontend_smoke.py",
-    "test_harbor_integration.py",
     "test_job_service.py",
     "test_langgraph_agent.py",
     "test_legacy_suites.py",
