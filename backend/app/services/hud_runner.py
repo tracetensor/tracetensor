@@ -275,16 +275,28 @@ async def run_hud_task(
     provider: str = "openai",
     model: str | None = None,
     timeout: float = 120.0,
+    rollout_timeout: float = 300.0,
     pass_threshold: float = 1.0,
     task_dir: Any = None,
     on_event: EventHook = None,
 ) -> HudTrialOutcome:
     """Run one BoundTask end-to-end and return a HudTrialOutcome.
 
-    provider: LLM provider name ("openai", "anthropic", "openrouter")
-    model:    specific model id (None → provider default)
-    timeout:  agent timeout in seconds
+    provider:        LLM provider name ("openai", "anthropic", "openrouter")
+    model:           specific model id (None → provider default)
+    timeout:         per-agent-call timeout in seconds (must be < rollout_timeout)
+    rollout_timeout: hard ceiling for the entire trial including init hooks,
+                     agent execution, and grading. Cancels via asyncio.
     """
+    if timeout >= rollout_timeout:
+        log.warning(
+            "hud_timeout_hierarchy_violated",
+            extra={
+                "agent_timeout": timeout,
+                "rollout_timeout": rollout_timeout,
+                "fix": "agent timeout should be < rollout_timeout",
+            },
+        )
     start = time.time()
     env_obj = bound_task.env
     warnings: list[str] = []
@@ -396,21 +408,61 @@ async def run_hud_task(
     )
 
 
+async def _run_hud_task_bounded(
+    bound_task: BoundTask,
+    *,
+    provider: str,
+    model: str | None,
+    timeout: float,
+    rollout_timeout: float,
+    pass_threshold: float,
+    task_dir: Any,
+    on_event: EventHook,
+) -> HudTrialOutcome:
+    """Wraps run_hud_task with a hard rollout_timeout via asyncio.wait_for."""
+    try:
+        return await asyncio.wait_for(
+            run_hud_task(
+                bound_task,
+                provider=provider,
+                model=model,
+                timeout=timeout,
+                rollout_timeout=rollout_timeout,
+                pass_threshold=pass_threshold,
+                task_dir=task_dir,
+                on_event=on_event,
+            ),
+            timeout=rollout_timeout,
+        )
+    except asyncio.TimeoutError:
+        log.warning(
+            "hud_rollout_timeout",
+            extra={"rollout_timeout": rollout_timeout, "provider": provider},
+        )
+        return HudTrialOutcome(
+            status=TrialStatus.ERROR.value,
+            error=f"rollout timed out after {rollout_timeout}s",
+            duration_s=rollout_timeout,
+        )
+
+
 def run_hud_task_sync(
     bound_task: BoundTask,
     provider: str = "openai",
     model: str | None = None,
     timeout: float = 120.0,
+    rollout_timeout: float = 300.0,
     pass_threshold: float = 1.0,
     task_dir: Any = None,
     on_event: EventHook = None,
 ) -> HudTrialOutcome:
     """Synchronous wrapper around run_hud_task for use in CLI and tests."""
-    return asyncio.run(run_hud_task(
+    return asyncio.run(_run_hud_task_bounded(
         bound_task,
         provider=provider,
         model=model,
         timeout=timeout,
+        rollout_timeout=rollout_timeout,
         pass_threshold=pass_threshold,
         task_dir=task_dir,
         on_event=on_event,

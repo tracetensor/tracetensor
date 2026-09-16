@@ -144,46 +144,22 @@ class TensorEnvironment:
                 await result
 
 
-# ── Stub graders ─────────────────────────────────────────────────────
+# ── Graders — real implementations from app.graders ──────────────────
+# These are re-exported here so env.py files that do
+#   from hud.graders import BashGrader, combine, exact_match
+# get the full TraceTensor implementations, not stubs.
 
-@dataclass
-class EvaluationResult:
-    score: float
-    reason: str = ""
-
-    def __float__(self) -> float:
-        return float(self.score)
-
-
-def combine(*results: Any, weights: list[float] | None = None) -> float:
-    """Weighted combination of grader results → single 0-1 score."""
-    vals: list[float] = []
-    for r in results:
-        if isinstance(r, EvaluationResult):
-            vals.append(r.score)
-        else:
-            vals.append(float(r))
-    if not vals:
-        return 0.0
-    if weights is None:
-        return sum(vals) / len(vals)
-    total_w = sum(weights[:len(vals)])
-    if total_w == 0:
-        return 0.0
-    return sum(v * w for v, w in zip(vals, weights)) / total_w
-
-
-# Stub BashGrader — grading via shell commands will use TraceTensor's
-# own verifier; this stub keeps env.py imports from crashing.
-class BashGrader:
-    @classmethod
-    async def grade(cls, *, weight: float = 1.0, command: str,
-                    cwd: str | None = None) -> EvaluationResult:
-        log.warning(
-            "bash_grader_stub_called",
-            extra={"command": command[:100]},
-        )
-        return EvaluationResult(score=0.0, reason="BashGrader stub: use TraceTensor verifier")
+from app.graders.base import EvaluationResult, SubScore
+from app.graders.bash import BashGrader
+from app.graders.combine import combine, combine_all, combine_any
+from app.graders.text import (
+    contains,
+    contains_all,
+    contains_any,
+    exact_match,
+    f1_score,
+    numeric_match,
+)
 
 
 class LLMJudgeGrader:
@@ -240,9 +216,18 @@ def inject_hud_stubs() -> None:
     }
     grader_attrs = {
         "EvaluationResult": EvaluationResult,
+        "SubScore": SubScore,
         "combine": combine,
+        "combine_any": combine_any,
+        "combine_all": combine_all,
         "BashGrader": BashGrader,
         "LLMJudgeGrader": LLMJudgeGrader,
+        "exact_match": exact_match,
+        "contains": contains,
+        "contains_any": contains_any,
+        "contains_all": contains_all,
+        "numeric_match": numeric_match,
+        "f1_score": f1_score,
     }
     from app.capabilities.base import Capability as _Cap
     cap_attrs = {

@@ -70,8 +70,16 @@ def load_hud_env(task_dir: Path) -> HudEnvLoad:
     if sys_path_added:
         sys.path.insert(0, task_dir_str)
 
+    # Stash whatever "env" was in sys.modules so we can restore it after.
+    _prev_env_module = sys.modules.get("env")
+
     try:
         env_module = _import_module_from_file(env_py, "_tt_user_env")
+
+        # Pin sys.modules["env"] to THIS env module so tasks.py's
+        # `from env import ...` resolves to the correct file, not a stale one
+        # from a previous load (sys.modules contamination fix).
+        sys.modules["env"] = env_module  # type: ignore[assignment]
 
         # Find the TensorEnvironment instance in the module
         env_obj = _find_env_object(env_module, env_py)
@@ -90,6 +98,11 @@ def load_hud_env(task_dir: Path) -> HudEnvLoad:
         # Clean up our temporary module names so re-loads work
         sys.modules.pop("_tt_user_env", None)
         sys.modules.pop("_tt_user_tasks", None)
+        # Restore the previous "env" entry (or remove ours if there was none)
+        if _prev_env_module is None:
+            sys.modules.pop("env", None)
+        else:
+            sys.modules["env"] = _prev_env_module
 
     log.info(
         "hud_env_loaded",
