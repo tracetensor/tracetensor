@@ -32,6 +32,7 @@ from app.models.job import Job, Trial
 from app.models.task import Task
 from app.services import diagnose, job_queue
 from app.services.event_bus import JobBus, create_bus, get_bus
+from app.services.format_detector import UnknownTaskFormat, detect_format
 from app.services.trial_runner import prebuild, run_trial
 
 log = get_logger("tracetensor.executor")
@@ -84,7 +85,29 @@ async def execute_job(SessionLocal: async_sessionmaker, job_id: uuid.UUID) -> No
             timeout_agent = task.timeout_agent_sec
             timeout_verifier = task.timeout_verifier_sec
 
-        ipath = Path(task_dir_str) / "instruction.md"
+        task_dir = Path(task_dir_str)
+
+        # Route HUD-format tasks to their own executor.
+        try:
+            task_format = detect_format(task_dir)
+        except UnknownTaskFormat:
+            task_format = "tracetensor"
+
+        if task_format == "hud":
+            await _execute_hud_job(
+                SessionLocal=SessionLocal,
+                job_id=job_id,
+                job=job,
+                task_dir=task_dir,
+                task_id=task_id,
+                run_id=run_id,
+                task_name=task_name,
+                bus=bus,
+                emit=emit,
+            )
+            return
+
+        ipath = task_dir / "instruction.md"
         instruction = ipath.read_text(errors="replace") if ipath.exists() else ""
 
         emit(
@@ -269,6 +292,132 @@ async def execute_job(SessionLocal: async_sessionmaker, job_id: uuid.UUID) -> No
             )
     finally:
         hb.cancel()
+
+
+async def _execute_hud_job(
+    *,
+    SessionLocal: async_sessionmaker,
+    job_id: uuid.UUID,
+    job: Job,
+    task_dir: Path,
+    task_id: uuid.UUID,
+    run_id: Optional[uuid.UUID],
+    task_name: Optional[str],
+    bus: JobBus,
+    emit: Any,
+) -> None:
+    """Execute a HUD-format task (env.py + tasks.py) as a server job.
+
+    Each (template × trial) combination becomes one Trial row in the DB.
+    The bus events mirror the native runner so the dashboard streams correctly.
+    """
+    from app.services import hud_runner as _hud_runner_mod
+    from app.services.hud_adapter import HudLoadError, load_hud_env
+
+    passed = 0
+    total = 0
+
+    try:
+        try:
+            loaded = load_hud_env(task_dir)
+        except HudLoadError as e:
+            err = f"HUD env load failed: {e}"
+            await _fail(SessionLocal, Job, job_id, err)
+            emit({"type": "job_done", "status": JobStatus.FAILED.value, "error": err})
+            if run_id is not None:
+                await _child_fanin(SessionLocal, run_id, job_id, task_name, 0, 0, JobStatus.FAILED)
+            return
+
+        # Build flat list: all tasks × all trials
+        all_pairs = [
+            (bt, trial_n)
+            for bt in loaded.tasks
+            for trial_n in range(job.n_trials)
+        ]
+        total = len(all_pairs)
+
+        emit({
+            "type": "job_started",
+            "agent": job.agent,
+            "model": job.model,
+            "n_trials": total,
+        })
+
+        db_lock = asyncio.Lock()
+
+        for idx, (bound_task, _trial_n) in enumerate(all_pairs):
+            emit({"type": "trial_started", "trial_num": idx})
+
+            outcome = await _hud_runner_mod.run_hud_task(
+                bound_task,
+                provider=job.agent,
+                model=job.model,
+                timeout=120.0,
+                task_dir=task_dir,
+            )
+
+            trial_id = uuid.uuid4()
+            async with db_lock:
+                async with SessionLocal() as db:
+                    db.add(Trial(
+                        id=trial_id,
+                        job_id=job_id,
+                        task_id=task_id,
+                        trial_num=idx,
+                        status=outcome.status,
+                        reward=outcome.reward,
+                        passed=outcome.passed,
+                        trajectory=outcome.trajectory,
+                        verifier_log=outcome.verifier_log,
+                        reward_payload=outcome.reward_payload,
+                        duration_s=outcome.duration_s,
+                        error=outcome.error,
+                    ))
+                    if outcome.passed:
+                        passed += 1
+                    job_row = (await db.execute(select(Job).where(Job.id == job_id))).scalar_one()
+                    job_row.trials_completed = idx + 1
+                    job_row.trials_passed = passed
+                    await db.commit()
+
+            emit({
+                "type": "trial_done",
+                "trial_num": idx,
+                "status": outcome.status,
+                "reward": outcome.reward,
+                "passed": outcome.passed,
+                "duration_s": outcome.duration_s,
+                "error": outcome.error,
+            })
+
+        async with SessionLocal() as db:
+            job_row = (await db.execute(select(Job).where(Job.id == job_id))).scalar_one()
+            job_row.status = JobStatus.COMPLETED.value
+            job_row.pass_rate = (passed / total) if total else None
+            job_row.finished_at = datetime.now(timezone.utc)
+            await db.commit()
+
+        emit({
+            "type": "job_done",
+            "status": JobStatus.COMPLETED.value,
+            "trials_passed": passed,
+            "n_trials": total,
+            "pass_rate": (passed / total) if total else None,
+        })
+
+        if run_id is not None:
+            await _child_fanin(
+                SessionLocal, run_id, job_id, task_name, passed, total, JobStatus.COMPLETED
+            )
+
+    except Exception as e:
+        await _fail(SessionLocal, Job, job_id, str(e))
+        emit({"type": "job_done", "status": JobStatus.FAILED.value, "error": str(e)[:500]})
+        if run_id is not None:
+            await _child_fanin(
+                SessionLocal, run_id, job_id, task_name, passed, total, JobStatus.FAILED
+            )
+    # hb is cancelled by the outer execute_job's finally block.
 
 
 async def _child_fanin(

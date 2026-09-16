@@ -79,10 +79,17 @@ class Capability:
         cls,
         *,
         name: str = "browser",
-        url: str,
+        url: str = "docker://auto",
         target_id: str | None = None,
     ) -> Capability:
-        """Chrome DevTools Protocol (CDP) over WebSocket."""
+        """Chrome DevTools Protocol (CDP) over WebSocket.
+
+        Omit `url` (or pass ``"docker://auto"``) to have TraceTensor spin up
+        the bundled Chromium container automatically.
+        """
+        if url == "docker://auto":
+            return cls(name=name, protocol="cdp/1.3", url="docker://auto",
+                       params={"managed": True})
         normalized = _normalize_url(url, default_scheme="ws", default_port=9222)
         params: dict[str, Any] = {}
         if target_id:
@@ -94,11 +101,18 @@ class Capability:
         cls,
         *,
         name: str = "desktop",
-        url: str,
+        url: str = "docker://auto",
         password: str | None = None,
         display: int = 0,
     ) -> Capability:
-        """VNC/RFB pixel + keyboard/mouse server."""
+        """VNC/RFB pixel + keyboard/mouse server.
+
+        Omit `url` (or pass ``"docker://auto"``) to have TraceTensor spin up
+        the bundled x11vnc/Xvfb container automatically.
+        """
+        if url == "docker://auto":
+            return cls(name=name, protocol="rfb/3.8", url="docker://auto",
+                       params={"managed": True, "display": display})
         normalized = _normalize_url(url, default_scheme="rfb", default_port=5900 + display)
         params: dict[str, Any] = {"display": display}
         if password:

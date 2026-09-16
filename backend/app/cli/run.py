@@ -146,16 +146,36 @@ def run(
         raise typer.Exit(2) from e
 
     if task_format == "hud":
-        _run_hud(
-            task_dir=task_dir,
-            agent=agent,
-            model=model,
-            n_trials=n_trials,
-            timeout=agent_timeout or (120.0 * timeout_scale),
-            output=output,
-            no_save=no_save,
-            json_out=json_out,
-        )
+        if server:
+            # Upload the env.py directory to the server and run it through the
+            # dashboard job queue — same flow as native format.
+            remote, wall, job_url = _run_remote(
+                server,
+                token,
+                task_dir,
+                agent,
+                model,
+                n_trials,
+                1,
+                backend,
+                json_out,
+                open_dashboard=open_dashboard,
+            )
+            _report(
+                task_dir.name, agent, model, n_trials,
+                remote, wall, json_out, saved=job_url, link=True,
+            )
+        else:
+            _run_hud(
+                task_dir=task_dir,
+                agent=agent,
+                model=model,
+                n_trials=n_trials,
+                timeout=agent_timeout or (120.0 * timeout_scale),
+                output=output,
+                no_save=no_save,
+                json_out=json_out,
+            )
         raise typer.Exit(0)
 
     # ── Native TraceTensor format (task.toml) ─────────────────────────────────

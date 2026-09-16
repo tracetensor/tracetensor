@@ -25,6 +25,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator, Callable, Optional
 
+from app.capabilities.base import Capability
 from app.core.logging import get_logger
 from app.models.enums import TrialStatus
 from app.services.hud_compat import BoundTask, TensorEnvironment
@@ -46,6 +47,96 @@ class HudTrialOutcome:
     duration_s: float | None = None
     error: str | None = None
     warnings: list = field(default_factory=list)
+
+
+# ── Docker capability orchestration ──────────────────────────────────────────
+
+_BROWSER_IMAGE = "tracetensor/browser"
+_DESKTOP_IMAGE = "tracetensor/desktop"
+_BROWSER_PORT = 9222
+_DESKTOP_PORT = 5900
+
+
+async def _docker_run(image: str, host_port: int, container_port: int) -> str | None:
+    """Start a detached Docker container and return its short id, or None on failure."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "run", "-d",
+            "-p", f"{host_port}:{container_port}",
+            "--rm",
+            image,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode == 0:
+            cid = stdout.decode().strip()[:12]
+            log.info("hud_docker_start", extra={"image": image, "port": host_port, "cid": cid})
+            return cid
+        log.warning("hud_docker_start_failed",
+                    extra={"image": image, "stderr": stderr.decode()[:300]})
+    except FileNotFoundError:
+        log.warning("hud_docker_not_found", extra={"image": image})
+    return None
+
+
+async def _docker_stop(cid: str) -> None:
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "stop", cid,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.communicate()
+    except Exception as exc:
+        log.warning("hud_docker_stop_failed", extra={"cid": cid, "error": str(exc)})
+
+
+async def _provision_capability_containers(
+    env_obj: TensorEnvironment,
+) -> list[str]:
+    """Spin up Docker containers for managed browser/desktop capabilities.
+
+    After ``run_init_hooks()`` the capabilities list is final. For any entry
+    whose URL is the sentinel ``docker://auto`` this function starts the
+    corresponding TraceTensor image, waits briefly for it to bind, then
+    replaces the capability in-place with the real URL.
+
+    Returns the container ids so the caller can stop them when the trial ends.
+    """
+    containers: list[str] = []
+    for i, cap in enumerate(list(env_obj.capabilities)):
+        if cap.url != "docker://auto":
+            continue
+
+        if cap.protocol == "cdp/1.3":
+            # Find a free-ish port by just using the base and hoping; a real
+            # production runner would use an ephemeral port scan.
+            port = _BROWSER_PORT + i
+            cid = await _docker_run(_BROWSER_IMAGE, port, _BROWSER_PORT)
+            if cid:
+                containers.append(cid)
+                await asyncio.sleep(1.0)  # let Chromium bind
+                real_url = f"ws://localhost:{port}"
+                env_obj.capabilities[i] = Capability(
+                    name=cap.name, protocol=cap.protocol, url=real_url,
+                    params={k: v for k, v in cap.params.items() if k != "managed"},
+                )
+                log.info("hud_browser_ready", extra={"url": real_url})
+
+        elif cap.protocol == "rfb/3.8":
+            port = _DESKTOP_PORT + i
+            cid = await _docker_run(_DESKTOP_IMAGE, port, _DESKTOP_PORT)
+            if cid:
+                containers.append(cid)
+                await asyncio.sleep(1.5)  # let x11vnc bind
+                real_url = f"rfb://localhost:{port}"
+                env_obj.capabilities[i] = Capability(
+                    name=cap.name, protocol=cap.protocol, url=real_url,
+                    params={k: v for k, v in cap.params.items() if k != "managed"},
+                )
+                log.info("hud_desktop_ready", extra={"url": real_url})
+
+    return containers
 
 
 def _has_workspace(env: TensorEnvironment) -> bool:
@@ -211,7 +302,7 @@ async def run_hud_task(
     if on_event:
         on_event({"type": "phase", "phase": "setup", "status": "running"})
 
-    # Run init hooks (env.initialize)
+    # Run init hooks (env.initialize) — may add capabilities
     try:
         await env_obj.run_init_hooks()
     except Exception as exc:
@@ -220,6 +311,13 @@ async def run_hud_task(
             error=f"env.initialize failed: {exc}",
             duration_s=time.time() - start,
         )
+
+    # Provision Docker containers for managed browser/desktop capabilities
+    containers: list[str] = []
+    try:
+        containers = await _provision_capability_containers(env_obj)
+    except Exception as exc:
+        log.warning("hud_container_provision_failed", extra={"error": str(exc)})
 
     if on_event:
         on_event({"type": "phase", "phase": "agent", "status": "running"})
@@ -262,6 +360,9 @@ async def run_hud_task(
             warnings=warnings,
         )
     finally:
+        # Stop any Docker containers we started
+        for cid in containers:
+            await _docker_stop(cid)
         # Always run shutdown hooks
         try:
             await env_obj.run_shutdown_hooks()

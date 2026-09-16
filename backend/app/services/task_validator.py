@@ -65,6 +65,10 @@ class ValidationResult:
 
 def validate_task(task_dir: Path) -> ValidationResult:
     """Inspect an evaluation directory on disk and report whether it can proceed."""
+    # HUD-format directories have env.py instead of task.toml.
+    if (task_dir / "env.py").exists() and not (task_dir / "task.toml").exists():
+        return _validate_hud_task(task_dir)
+
     result = ValidationResult(is_valid=False, status=STATUS_REGISTERED)
 
     instruction = task_dir / "instruction.md"
@@ -201,6 +205,27 @@ def validate_task(task_dir: Path) -> ValidationResult:
         for msg in preflight:
             if msg not in result.host_notes:
                 result.host_notes.append(msg)
+    return result
+
+
+def _validate_hud_task(task_dir: Path) -> ValidationResult:
+    """Validate a HUD-format directory (env.py + tasks.py)."""
+    result = ValidationResult(is_valid=True, status=STATUS_READY)
+    result.has_instruction = True   # env.py encodes tasks + graders
+    result.has_test_script = True   # grading is inline in the generator
+
+    if not (task_dir / "tasks.py").exists():
+        result.errors.append(
+            "Missing tasks.py — define a `tasks` list of task instances."
+        )
+        result.is_valid = False
+        result.status = STATUS_REGISTERED
+
+    # Warn if no tasks are declared (empty tasks.py)
+    tasks_py = task_dir / "tasks.py"
+    if tasks_py.exists() and tasks_py.stat().st_size == 0:
+        result.warnings.append("tasks.py is empty — nothing will run.")
+
     return result
 
 
