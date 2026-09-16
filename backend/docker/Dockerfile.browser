@@ -1,0 +1,22 @@
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    chromium-browser \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN useradd -m -s /bin/bash agent
+
+USER agent
+
+EXPOSE 9222
+
+ENTRYPOINT ["chromium-browser", \
+    "--remote-debugging-port=9222", \
+    "--remote-debugging-address=0.0.0.0", \
+    "--no-sandbox", \
+    "--disable-gpu", \
+    "--disable-dev-shm-usage", \
+    "--headless=new"]

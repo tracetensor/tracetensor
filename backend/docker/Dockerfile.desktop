@@ -1,0 +1,21 @@
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    x11vnc \
+    xvfb \
+    fluxbox \
+    x11-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN useradd -m -s /bin/bash agent
+
+COPY --chown=root:root start.sh /start.sh
+RUN chmod +x /start.sh
+
+USER agent
+
+EXPOSE 5900
+
+ENTRYPOINT ["/start.sh"]

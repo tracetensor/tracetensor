@@ -26,13 +26,19 @@ from app.models.enums import JobStatus
 
 
 def _resolve_task(path: Path) -> Path:
-    """Point at a task directory (instruction.md + task.toml + tests/)."""
+    """Point at a task directory.
+
+    Accepts both native format (task.toml / instruction.md) and
+    HUD-compatible format (env.py).
+    """
     if not path.exists():
         ui.error(f"No such path: {path}")
         raise typer.Exit(2)
-    if not (path / "task.toml").exists() and not (path / "instruction.md").exists():
+    has_native = (path / "task.toml").exists() or (path / "instruction.md").exists()
+    has_hud = (path / "env.py").exists()
+    if not has_native and not has_hud:
         ui.error(
-            f"{path} doesn't look like a task (no task.toml / instruction.md). "
+            f"{path} doesn't look like a task (no task.toml / instruction.md / env.py). "
             "Point at a task directory."
         )
         raise typer.Exit(2)
@@ -130,6 +136,29 @@ def run(
     from app.services.trial_runner import prebuild, run_trial
 
     task_dir = _resolve_task(path)
+
+    # ── HUD-compatible format (env.py) ────────────────────────────────────────
+    from app.services.format_detector import detect_format, UnknownTaskFormat
+    try:
+        task_format = detect_format(task_dir)
+    except UnknownTaskFormat as e:
+        ui.error(str(e))
+        raise typer.Exit(2) from e
+
+    if task_format == "hud":
+        _run_hud(
+            task_dir=task_dir,
+            agent=agent,
+            model=model,
+            n_trials=n_trials,
+            timeout=agent_timeout or (120.0 * timeout_scale),
+            output=output,
+            no_save=no_save,
+            json_out=json_out,
+        )
+        raise typer.Exit(0)
+
+    # ── Native TraceTensor format (task.toml) ─────────────────────────────────
     instruction = ""
     ipath = task_dir / "instruction.md"
     if ipath.exists():
@@ -328,6 +357,101 @@ def run(
     _report(name, agent, model, n_trials, results, wall, json_out, saved=saved_to, link=False)
     # Nonzero exit if nothing passed, so CI can gate on it.
     raise typer.Exit(0 if passed > 0 else 1)
+
+
+def _run_hud(
+    task_dir: Path,
+    agent: str,
+    model: str | None,
+    n_trials: int,
+    timeout: float,
+    output: Path,
+    no_save: bool,
+    json_out: bool,
+) -> None:
+    """Execute all tasks in a HUD-format env.py directory."""
+    import time
+    from app.services.hud_adapter import load_hud_env, HudLoadError
+    from app.services.hud_runner import run_hud_task_sync
+    from app.services.trial_hints import enrich_trial_result
+
+    # Parse provider / model from the agent string (same convention as native).
+    # HUD text tasks go through a single-turn LLM call; the agent string is
+    # interpreted as a provider name ("openai", "anthropic", "openrouter").
+    provider = agent
+    try:
+        from app.services import llm
+        provider = llm.canonical_provider(agent)
+    except Exception:
+        pass
+
+    try:
+        loaded = load_hud_env(task_dir)
+    except HudLoadError as e:
+        ui.error(f"Could not load env.py: {e}")
+        raise typer.Exit(2) from e
+
+    env_name = loaded.env.name
+    tasks = loaded.tasks
+    if not tasks:
+        ui.warn("No tasks found in tasks.py — nothing to run.")
+        return
+
+    if not json_out:
+        ui.console.print()
+        ui.console.print(ui.kv_panel("run [hud]", [
+            ("env", env_name),
+            ("tasks", str(len(tasks))),
+            ("agent", f"{provider}" + (f" · {model}" if model else "")),
+            ("trials", f"{n_trials} per task"),
+            ("timeout", f"{int(timeout)}s"),
+        ]))
+
+    all_results: list[dict] = []
+    wall_start = time.time()
+
+    for task_idx, task in enumerate(tasks):
+        task_label = f"{env_name}/{task.template_id}({', '.join(f'{k}={v!r}' for k, v in list(task.kwargs.items())[:2])})"
+        for trial_n in range(n_trials):
+            if not json_out:
+                ui.console.print(f"  [muted]running[/] {task_label} trial #{trial_n + 1}…")
+
+            outcome = run_hud_task_sync(
+                task,
+                provider=provider,
+                model=model,
+                timeout=timeout,
+                task_dir=task_dir,
+            )
+            result = enrich_trial_result({
+                "n": task_idx * n_trials + trial_n,
+                "task": task_label,
+                "status": outcome.status,
+                "passed": outcome.passed,
+                "reward": outcome.reward,
+                "duration_s": outcome.duration_s,
+                "steps": 1,
+                "error": outcome.error,
+                "trajectory": outcome.trajectory,
+                "reward_payload": outcome.reward_payload,
+            })
+            all_results.append(result)
+            if not json_out:
+                icon = "[ok]✓[/]" if outcome.passed else "[bad]✗[/]"
+                answer = (outcome.trajectory or {}).get("answer", "")[:60]
+                ui.console.print(f"    {icon} reward={outcome.reward:.2f}  answer={answer!r}")
+
+    wall = time.time() - wall_start
+    passed = sum(1 for r in all_results if r.get("passed"))
+    rewards = [r["reward"] for r in all_results if r.get("reward") is not None]
+    mean_reward = sum(rewards) / len(rewards) if rewards else None
+
+    saved_to = None
+    if not no_save:
+        saved_to = str(_save(output, env_name, provider, model, "hud", all_results, passed, mean_reward, wall))
+
+    _report(env_name, provider, model, len(all_results), all_results, wall, json_out,
+            saved=saved_to, link=False)
 
 
 def _report(
