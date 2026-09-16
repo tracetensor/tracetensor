@@ -23,6 +23,7 @@ import typer
 from app.cli import console as ui
 from app.cli.backends import backends_app
 from app.cli.dataset import dataset_app
+from app.cli.init_env import init_env_cmd as _init
 from app.cli.run import run as _run
 from app.cli.serve import serve as _serve
 from app.cli.tasks import tasks_app
@@ -37,6 +38,7 @@ app = typer.Typer(
 )
 
 # Top-level commands.
+app.command("init")(_init)
 app.command("run")(_run)
 app.command("serve")(_serve)
 # Sub-app: `tracetensor tasks validate …`

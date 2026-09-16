@@ -216,3 +216,87 @@ def make_phase_tracker(
         return state["text"]
 
     return on_event, current
+
+
+def comparison_table(
+    model_results: "dict[str, list[dict]]",
+    task_labels: "list[str] | None" = None,
+) -> "Table":
+    """Render a model × task score comparison table.
+
+    model_results: {model_label: [{"task": str, "reward": float, "passed": bool}, ...]}
+    Each list must be in the same task order.
+    """
+    from rich.text import Text
+
+    models = list(model_results.keys())
+    # Derive task labels from first model if not provided
+    if not task_labels:
+        first = next(iter(model_results.values()), [])
+        task_labels = [r.get("task", f"task {i+1}") for i, r in enumerate(first)]
+
+    t = Table(box=None, pad_edge=False, show_header=True, header_style="bold")
+    t.add_column("Task", style="muted", no_wrap=True, max_width=42)
+    for m in models:
+        t.add_column(m, justify="center")
+    t.add_column("Best", justify="center")
+
+    for i, label in enumerate(task_labels):
+        short = label if len(label) <= 42 else label[:39] + "…"
+        row_scores: list[float | None] = []
+        cells: list[str] = []
+        for m in models:
+            res_list = model_results[m]
+            if i < len(res_list):
+                r = res_list[i]
+                reward = r.get("reward")
+                row_scores.append(reward)
+                if reward is None:
+                    cells.append("[muted]—[/]")
+                elif reward >= 1.0:
+                    cells.append("[ok]1.00[/]")
+                elif reward <= 0.0:
+                    cells.append("[bad]0.00[/]")
+                else:
+                    cells.append(f"[warn]{reward:.2f}[/]")
+            else:
+                row_scores.append(None)
+                cells.append("[muted]—[/]")
+
+        # Best model for this task
+        valid = [(s, m) for s, m in zip(row_scores, models) if s is not None]
+        if valid:
+            best_score = max(s for s, _ in valid)
+            best_models = [m for s, m in valid if s == best_score]
+            best_cell = "[ok]" + ", ".join(
+                m.split("/")[-1][:10] for m in best_models
+            ) + "[/]"
+        else:
+            best_cell = "[muted]—[/]"
+
+        t.add_row(short, *cells, best_cell)
+
+    # Mean row
+    t.add_section()
+    mean_cells: list[str] = []
+    for m in models:
+        res_list = model_results[m]
+        rewards = [r.get("reward") for r in res_list if r.get("reward") is not None]
+        if rewards:
+            mean = sum(rewards) / len(rewards)
+            style = "ok" if mean >= 0.8 else ("warn" if mean >= 0.5 else "bad")
+            mean_cells.append(f"[{style}]{mean:.2f}[/]")
+        else:
+            mean_cells.append("[muted]—[/]")
+
+    # Overall winner
+    mean_vals = []
+    for m in models:
+        res_list = model_results[m]
+        rewards = [r.get("reward") for r in res_list if r.get("reward") is not None]
+        mean_vals.append((sum(rewards) / len(rewards) if rewards else 0.0, m))
+    best_mean = max(mean_vals, key=lambda x: x[0])
+    winner = "[ok]" + best_mean[1].split("/")[-1][:10] + "[/]"
+
+    t.add_row("[bold]Mean[/]", *mean_cells, winner)
+    return t

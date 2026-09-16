@@ -121,6 +121,15 @@ def run(
         "--open",
         help="Open the dashboard in your browser (--server only; link prints immediately).",
     ),
+    models: Optional[str] = typer.Option(
+        None,
+        "--models",
+        help=(
+            "Comma-separated list of models to compare (HUD tasks only). "
+            "Each entry is 'model' (uses -a provider) or 'provider/model'. "
+            "Example: --models gpt-4o-mini,gpt-4.1-mini,gpt-4o"
+        ),
+    ),
 ) -> None:
     """Run an agent against a task and grade trials (locally, or on a --server)."""
     if verbose:
@@ -146,6 +155,19 @@ def run(
         raise typer.Exit(2) from e
 
     if task_format == "hud":
+        if models:
+            # ── Multi-model comparison ────────────────────────────────────────
+            _run_multi_model(
+                task_dir=task_dir,
+                agent=agent,
+                models_str=models,
+                n_trials=n_trials,
+                timeout=agent_timeout or (120.0 * timeout_scale),
+                output=output,
+                no_save=no_save,
+                json_out=json_out,
+            )
+            raise typer.Exit(0)
         if server:
             # Upload the env.py directory to the server and run it through the
             # dashboard job queue — same flow as native format.
@@ -472,6 +494,154 @@ def _run_hud(
 
     _report(env_name, provider, model, len(all_results), all_results, wall, json_out,
             saved=saved_to, link=False)
+
+
+def _run_multi_model(
+    task_dir: Path,
+    agent: str,
+    models_str: str,
+    n_trials: int,
+    timeout: float,
+    output: Path,
+    no_save: bool,
+    json_out: bool,
+) -> None:
+    """Run all HUD tasks against multiple models and print a comparison table."""
+    import time
+    from app.services import llm as _llm
+    from app.services.hud_adapter import load_hud_env, HudLoadError
+    from app.services.hud_runner import run_hud_task_sync
+    from app.services.trial_hints import enrich_trial_result
+
+    # Parse default provider from agent string
+    default_provider = agent
+    try:
+        default_provider = _llm.canonical_provider(agent)
+    except Exception:
+        pass
+
+    # Parse model specs: "gpt-4o-mini,openai/gpt-4o" → [(provider, model, label), ...]
+    model_specs: list[tuple[str, str, str]] = []
+    for spec in models_str.split(","):
+        spec = spec.strip()
+        if not spec:
+            continue
+        if "/" in spec:
+            prov, mod = spec.split("/", 1)
+            prov = _llm.canonical_provider(prov)
+        else:
+            prov, mod = default_provider, spec
+        label = f"{prov}/{mod}"
+        model_specs.append((prov, mod, label))
+
+    if not model_specs:
+        ui.error("--models: no valid model specs found.")
+        raise typer.Exit(2)
+
+    try:
+        loaded = load_hud_env(task_dir)
+    except HudLoadError as e:
+        ui.error(f"Could not load env.py: {e}")
+        raise typer.Exit(2) from e
+
+    env_name = loaded.env.name
+    tasks = loaded.tasks
+    if not tasks:
+        ui.warn("No tasks found in tasks.py — nothing to run.")
+        return
+
+    if not json_out:
+        ui.console.print()
+        ui.console.print(ui.kv_panel("compare", [
+            ("env",    env_name),
+            ("tasks",  str(len(tasks))),
+            ("models", str(len(model_specs))),
+            ("trials", f"{n_trials} per task × model"),
+            ("timeout", f"{int(timeout)}s"),
+        ]))
+
+    # {label: [result_dicts]}
+    model_results: dict[str, list[dict]] = {}
+    task_labels: list[str] = []
+
+    # Build task labels once
+    for task in tasks:
+        kw_str = ", ".join(f"{k}={v!r}" for k, v in list(task.kwargs.items())[:2])
+        task_labels.append(f"{task.template_id}({kw_str})")
+
+    wall_start = time.time()
+
+    for prov, mod, label in model_specs:
+        if not json_out:
+            ui.console.print(f"\n  [accent]▶[/] [val]{label}[/]")
+        results_for_model: list[dict] = []
+
+        for task_idx, task in enumerate(tasks):
+            task_label = task_labels[task_idx]
+            for trial_n in range(n_trials):
+                outcome = run_hud_task_sync(
+                    task, provider=prov, model=mod, timeout=timeout, task_dir=task_dir
+                )
+                result = enrich_trial_result({
+                    "n": task_idx * n_trials + trial_n,
+                    "task": task_label,
+                    "status": outcome.status,
+                    "passed": outcome.passed,
+                    "reward": outcome.reward,
+                    "duration_s": outcome.duration_s,
+                    "steps": 1,
+                    "error": outcome.error,
+                    "trajectory": outcome.trajectory,
+                })
+                results_for_model.append(result)
+                if not json_out:
+                    icon = "[ok]✓[/]" if outcome.passed else "[bad]✗[/]"
+                    ans = (outcome.trajectory or {}).get("answer", "")[:50]
+                    reward_str = f"{outcome.reward:.2f}" if outcome.reward is not None else "err"
+                    ui.console.print(
+                        f"    {icon} [muted]{task_label[:40]}[/]  "
+                        f"reward={reward_str}  [muted]{ans!r}[/]"
+                    )
+
+        model_results[label] = results_for_model
+
+    wall = time.time() - wall_start
+
+    if json_out:
+        print(json.dumps({
+            "env": env_name,
+            "models": [l for _, _, l in model_specs],
+            "tasks": task_labels,
+            "wall_s": round(wall, 2),
+            "results": {
+                label: [
+                    {"task": r["task"], "reward": r.get("reward"),
+                     "passed": r.get("passed"), "error": r.get("error")}
+                    for r in results
+                ]
+                for label, results in model_results.items()
+            },
+        }, indent=2))
+        return
+
+    # ── Comparison table ──────────────────────────────────────────────────────
+    ui.console.print()
+    ui.console.print("[bold]Model Comparison[/]")
+    ui.console.print()
+    ui.console.print(ui.comparison_table(model_results, task_labels))
+    ui.console.print()
+    ui.console.print(f"[muted]wall time: {wall:.1f}s[/]")
+    ui.console.print()
+
+    if not no_save:
+        all_flat = [r for rs in model_results.values() for r in rs]
+        passed = sum(1 for r in all_flat if r.get("passed"))
+        rewards = [r["reward"] for r in all_flat if r.get("reward") is not None]
+        mean_reward = sum(rewards) / len(rewards) if rewards else None
+        saved = _save(output, env_name, "compare", models_str[:40], "hud",
+                      all_flat, passed, mean_reward, wall)
+        ui.hint(f"↳ artifacts: {saved}")
+        ui.console.print()
 
 
 def _report(

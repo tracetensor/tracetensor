@@ -163,13 +163,7 @@ from app.graders.text import (
 )
 
 
-class LLMJudgeGrader:
-    @classmethod
-    async def grade(cls, *, weight: float = 1.0, rubric: str,
-                    output: str, model: str | None = None) -> EvaluationResult:
-        from app.services import llm_judge
-        jr = llm_judge.judge(rubric, output, model, pass_threshold=0.5)
-        return EvaluationResult(score=jr.reward, reason=jr.log)
+# LLMJudgeGrader is imported from app.graders.llm_judge above — no stub needed.
 
 
 # ── Stub settings ────────────────────────────────────────────────────
