@@ -152,6 +152,7 @@ class TensorEnvironment:
 from app.graders.base import EvaluationResult, SubScore
 from app.graders.bash import BashGrader
 from app.graders.combine import combine, combine_all, combine_any
+from app.graders.llm_judge import LLMJudgeGrader
 from app.graders.text import (
     contains,
     contains_all,
@@ -221,7 +222,7 @@ def inject_hud_stubs() -> None:
         "combine_any": combine_any,
         "combine_all": combine_all,
         "BashGrader": BashGrader,
-        "LLMJudgeGrader": LLMJudgeGrader,
+        "LLMJudgeGrader": LLMJudgeGrader,  # real parallel criteria grader
         "exact_match": exact_match,
         "contains": contains,
         "contains_any": contains_any,

@@ -19,7 +19,7 @@ import os
 import signal
 from pathlib import Path
 
-from app.graders.base import EvaluationResult
+from app.graders.base import EvaluationResult, SubScore
 
 _DEFAULT_TIMEOUT = 600.0
 _OUT_LIMIT = 2000
@@ -86,8 +86,9 @@ class BashGrader:
             )
         except FileNotFoundError:
             return EvaluationResult(
-                score=0.0,
-                reason="BashGrader: /bin/bash not found",
+                score=0.0, reason="BashGrader: /bin/bash not found",
+                subscores=[SubScore(name="bash", score=0.0, weight=weight,
+                                    metadata={"command": command[:200], "error": "bash not found"})],
             )
 
         try:
@@ -95,8 +96,9 @@ class BashGrader:
         except asyncio.TimeoutError:
             _kill_pgroup(proc.pid)
             return EvaluationResult(
-                score=0.0,
-                reason=f"BashGrader: timed out after {timeout}s",
+                score=0.0, reason=f"BashGrader: timed out after {timeout}s",
+                subscores=[SubScore(name="bash", score=0.0, weight=weight,
+                                    metadata={"command": command[:200], "timeout": timeout})],
             )
 
         rc = proc.returncode
@@ -108,4 +110,14 @@ class BashGrader:
             reason += f" stderr={stderr!r}"
         if stdout and rc != 0:
             reason += f" stdout={stdout!r}"
-        return EvaluationResult(score=score, reason=reason)
+        return EvaluationResult(
+            score=score,
+            reason=reason,
+            subscores=[SubScore(
+                name="bash",
+                score=score,
+                weight=weight,
+                metadata={"exit_code": rc, "command": command[:200],
+                          "stdout": stdout[:500], "stderr": stderr[:200]},
+            )],
+        )

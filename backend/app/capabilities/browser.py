@@ -77,17 +77,21 @@ class BrowserClient(CapabilityClient):
         try:
             import httpx
             async with httpx.AsyncClient() as c:
+                # Fallback 2: GET /json — list existing page targets
                 resp = await c.get(f"http://{host}:{port}/json", timeout=5.0)
                 targets = resp.json()
-            pages = [t for t in targets if t.get("type") == "page"]
-            if not pages:
-                resp2 = await httpx.AsyncClient().__aenter__()
-                try:
-                    resp2 = await resp2.get(f"http://{host}:{port}/json/new", timeout=5.0)
-                    pages = [resp2.json()]
-                finally:
-                    pass
-            ws_url = pages[0].get("webSocketDebuggerUrl", "")
+                pages = [t for t in targets if t.get("type") == "page"]
+
+                # Fallback 3: PUT /json/new — create a fresh page if none exist
+                if not pages:
+                    resp2 = await c.put(f"http://{host}:{port}/json/new", timeout=5.0)
+                    new_target = resp2.json()
+                    if new_target and new_target.get("webSocketDebuggerUrl"):
+                        pages = [new_target]
+                        log.info("browser_new_page_created",
+                                 extra={"target_id": new_target.get("id")})
+
+            ws_url = pages[0].get("webSocketDebuggerUrl", "") if pages else ""
             if ws_url:
                 return ws_url
         except Exception as exc:

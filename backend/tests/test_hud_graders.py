@@ -471,3 +471,367 @@ class TestRealAPIGraders:
         )
         assert outcome.error is None or "timed out" not in (outcome.error or "")
         assert outcome.reward is not None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 5. SubScore self-annotation
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestSubScoreAnnotation:
+    """Every text grader should include itself as a SubScore in the result."""
+
+    def test_exact_match_populates_subscore(self):
+        from app.graders.text import exact_match
+        r = exact_match("Paris", "Paris")
+        assert len(r.subscores) == 1
+        ss = r.subscores[0]
+        assert ss.name == "exact_match"
+        assert ss.score == 1.0
+        assert "prediction" in ss.metadata
+
+    def test_exact_match_mismatch_subscore(self):
+        from app.graders.text import exact_match
+        r = exact_match("London", "Paris")
+        assert r.subscores[0].score == 0.0
+
+    def test_contains_subscore(self):
+        from app.graders.text import contains
+        r = contains("The cat sat on the mat", "cat")
+        assert r.subscores[0].name == "contains"
+        assert r.subscores[0].score == 1.0
+        assert "substring" in r.subscores[0].metadata
+
+    def test_contains_any_subscore(self):
+        from app.graders.text import contains_any
+        r = contains_any("I love dogs", ["cat", "dog", "bird"])
+        ss = r.subscores[0]
+        assert ss.name == "contains_any"
+        assert ss.score == 1.0
+        assert "matched" in ss.metadata
+        assert "dog" in ss.metadata["matched"]
+
+    def test_contains_all_subscore_missing(self):
+        from app.graders.text import contains_all
+        r = contains_all("I have a cat", ["cat", "dog"])
+        ss = r.subscores[0]
+        assert ss.score == 0.0
+        assert "dog" in ss.metadata["missing"]
+
+    def test_numeric_match_subscore(self):
+        from app.graders.text import numeric_match
+        r = numeric_match("212", 212.0)
+        ss = r.subscores[0]
+        assert ss.name == "numeric_match"
+        assert ss.score == 1.0
+        assert ss.metadata["pred"] == 212.0
+
+    def test_numeric_match_tolerance_metadata(self):
+        from app.graders.text import numeric_match
+        r = numeric_match("211.9", 212.0, tolerance=0.5)
+        ss = r.subscores[0]
+        assert ss.score == 1.0
+        assert "abs_err" in ss.metadata
+
+    def test_f1_score_subscore(self):
+        from app.graders.text import f1_score
+        r = f1_score("the cat sat", "cat sat mat")
+        ss = r.subscores[0]
+        assert ss.name == "f1_score"
+        assert 0 < ss.score < 1.0
+        assert "precision" in ss.metadata
+        assert "recall" in ss.metadata
+
+    @pytest.mark.asyncio
+    async def test_bash_grader_subscore(self):
+        from app.graders.bash import BashGrader
+        r = await BashGrader.grade(command="exit 0", timeout=5)
+        ss = r.subscores[0]
+        assert ss.name == "bash"
+        assert ss.score == 1.0
+        assert ss.metadata["exit_code"] == 0
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 6. LLMJudgeGrader
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestLLMJudgeGrader:
+    """LLMJudgeGrader — unit tests use mocked LLM; real-API tests are skipped."""
+
+    @pytest.mark.asyncio
+    async def test_all_met_gives_1(self, monkeypatch):
+        from app.graders.llm_judge import LLMJudgeGrader, _parse_status
+        import app.graders.llm_judge as _mod
+
+        async def _fake_one(crit, output, provider, model, loop):
+            return True
+
+        monkeypatch.setattr(_mod, "_evaluate_one", _fake_one)
+        r = await LLMJudgeGrader.grade(
+            output="Great answer",
+            criteria=["Mentions something", "Is concise"],
+        )
+        assert r.score == 1.0
+        assert len(r.subscores) == 2
+        assert all(ss.score == 1.0 for ss in r.subscores)
+
+    @pytest.mark.asyncio
+    async def test_none_met_gives_0(self, monkeypatch):
+        from app.graders.llm_judge import LLMJudgeGrader
+        import app.graders.llm_judge as _mod
+
+        async def _fake_one(crit, output, provider, model, loop):
+            return False
+
+        monkeypatch.setattr(_mod, "_evaluate_one", _fake_one)
+        r = await LLMJudgeGrader.grade(
+            output="Bad answer",
+            criteria=[{"criterion": "Must be correct", "weight": 1.0}],
+        )
+        assert r.score == 0.0
+        assert r.subscores[0].metadata["status"] == "UNMET"
+
+    @pytest.mark.asyncio
+    async def test_weighted_partial_score(self, monkeypatch):
+        from app.graders.llm_judge import LLMJudgeGrader
+        import app.graders.llm_judge as _mod
+
+        calls: list[str] = []
+
+        async def _fake_one(crit, output, provider, model, loop):
+            calls.append(crit)
+            return "MET" in crit
+
+        monkeypatch.setattr(_mod, "_evaluate_one", _fake_one)
+        r = await LLMJudgeGrader.grade(
+            output="partial",
+            criteria=[
+                {"criterion": "MET first", "weight": 0.6},
+                {"criterion": "second fails", "weight": 0.4},
+            ],
+        )
+        assert abs(r.score - 0.6) < 0.01
+        assert len(calls) == 2  # both evaluated in parallel
+
+    @pytest.mark.asyncio
+    async def test_empty_criteria_returns_0(self):
+        from app.graders.llm_judge import LLMJudgeGrader
+        r = await LLMJudgeGrader.grade(output="anything", criteria=[])
+        assert r.score == 0.0
+
+    @pytest.mark.asyncio
+    async def test_evaluation_failure_counts_as_unmet(self, monkeypatch):
+        from app.graders.llm_judge import LLMJudgeGrader
+        import app.graders.llm_judge as _mod
+
+        async def _fail(crit, output, provider, model, loop):
+            return None  # parse failure
+
+        monkeypatch.setattr(_mod, "_evaluate_one", _fail)
+        r = await LLMJudgeGrader.grade(
+            output="x",
+            criteria=["some criterion"],
+        )
+        assert r.score == 0.0
+        assert r.subscores[0].metadata["status"] == "evaluation failed"
+
+    def test_parse_status_met(self):
+        from app.graders.llm_judge import _parse_status
+        assert _parse_status('{"criterion_status": "MET"}') is True
+        assert _parse_status('{"criterion_status": "UNMET"}') is False
+        assert _parse_status('garbage') is None
+        assert _parse_status('Some extra text {"criterion_status": "MET"} ok') is True
+
+    @pytest.mark.skipif(not os.getenv("OPENAI_API_KEY"), reason="No OPENAI_API_KEY set")
+    @pytest.mark.asyncio
+    async def test_llm_judge_real_api(self):
+        """Real criteria evaluation — Paris is correct capital, London is not."""
+        from app.graders.llm_judge import LLMJudgeGrader
+        result = await LLMJudgeGrader.grade(
+            output="Paris",
+            criteria=[
+                {"criterion": "The output is a city name", "weight": 0.5},
+                {"criterion": "The output is the capital city of France", "weight": 0.5},
+            ],
+            provider="openai",
+            model="gpt-4o-mini",
+        )
+        assert result.score >= 0.5, f"Expected at least 0.5, got {result.score}"
+        assert len(result.subscores) == 2
+        assert result.subscores[0].name == "The output is a city name"
+
+    @pytest.mark.skipif(not os.getenv("OPENAI_API_KEY"), reason="No OPENAI_API_KEY set")
+    @pytest.mark.asyncio
+    async def test_llm_judge_wrong_answer(self):
+        """Wrong capital — criteria should be UNMET → score 0."""
+        from app.graders.llm_judge import LLMJudgeGrader
+        result = await LLMJudgeGrader.grade(
+            output="London",
+            criteria=[
+                {"criterion": "The output is the capital city of France", "weight": 1.0},
+            ],
+            provider="openai",
+            model="gpt-4o-mini",
+        )
+        assert result.score == 0.0, f"London is not Paris; expected 0.0, got {result.score}"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 7. CDP 3rd-fallback (PUT /json/new)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestCDPEndpointResolution:
+    """_resolve_page_ws fallback chain."""
+
+    @pytest.mark.asyncio
+    async def test_direct_devtools_url_used_as_is(self):
+        from app.capabilities.browser import BrowserClient
+        url = "ws://localhost:9222/devtools/page/abc123"
+        result = await BrowserClient._resolve_page_ws("localhost", 9222, None, url)
+        assert result == url
+
+    @pytest.mark.asyncio
+    async def test_target_id_constructs_url(self):
+        from app.capabilities.browser import BrowserClient
+        result = await BrowserClient._resolve_page_ws(
+            "localhost", 9222, "target-xyz", "ws://localhost:9222"
+        )
+        assert result == "ws://localhost:9222/devtools/page/target-xyz"
+
+    @pytest.mark.asyncio
+    async def test_get_json_returns_page(self, monkeypatch):
+        """Fallback 2: GET /json returns a page with webSocketDebuggerUrl."""
+        from unittest.mock import AsyncMock, MagicMock
+        from app.capabilities.browser import BrowserClient
+        import app.capabilities.browser as _browser_mod
+
+        page = {"type": "page", "webSocketDebuggerUrl": "ws://localhost:9222/devtools/page/p1"}
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = [page]
+
+        mock_client = AsyncMock()
+        mock_client.get.return_value = mock_resp
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_ctx.__aexit__ = AsyncMock(return_value=None)
+
+        import httpx
+        monkeypatch.setattr(httpx, "AsyncClient", lambda: mock_ctx)
+
+        result = await BrowserClient._resolve_page_ws("localhost", 9222, None, "ws://localhost:9222")
+        assert result == "ws://localhost:9222/devtools/page/p1"
+
+    @pytest.mark.asyncio
+    async def test_put_json_new_when_no_pages(self, monkeypatch):
+        """Fallback 3: GET /json returns no pages → PUT /json/new."""
+        from unittest.mock import AsyncMock, MagicMock
+        from app.capabilities.browser import BrowserClient
+        import httpx
+
+        new_target = {
+            "type": "page", "id": "new1",
+            "webSocketDebuggerUrl": "ws://localhost:9222/devtools/page/new1",
+        }
+        empty_resp = MagicMock()
+        empty_resp.json.return_value = []
+        new_resp = MagicMock()
+        new_resp.json.return_value = new_target
+
+        mock_client = AsyncMock()
+        mock_client.get.return_value = empty_resp
+        mock_client.put.return_value = new_resp
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_ctx.__aexit__ = AsyncMock(return_value=None)
+
+        monkeypatch.setattr(httpx, "AsyncClient", lambda: mock_ctx)
+
+        result = await BrowserClient._resolve_page_ws("localhost", 9222, None, "ws://localhost:9222")
+        assert result == "ws://localhost:9222/devtools/page/new1"
+        mock_client.put.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_bare_ws_on_error(self):
+        """If GET /json fails entirely, fall back to bare ws://host:port."""
+        from app.capabilities.browser import BrowserClient
+        # Port 1 is effectively never listening; connection should fail fast
+        result = await BrowserClient._resolve_page_ws("127.0.0.1", 19222, None, "ws://127.0.0.1:19222")
+        assert result == "ws://127.0.0.1:19222"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 8. Agent retry on stream failure
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestAgentStreamRetry:
+    """_retry_call retries transient connection errors, not ProviderError."""
+
+    def test_succeeds_on_first_attempt(self):
+        from app.services.llm import _retry_call
+        calls = []
+        from app.services.llm import LLMCallResult
+
+        def fn():
+            calls.append(1)
+            return LLMCallResult(text="ok", provider="openai", model="gpt-4o",
+                                 input_tokens=10, output_tokens=5,
+                                 latency_ms=100, cost_usd=None)
+
+        result = _retry_call(fn)
+        assert result.text == "ok"
+        assert len(calls) == 1
+
+    def test_retries_on_connection_error(self):
+        from app.services.llm import _retry_call, LLMCallResult
+        attempts = []
+
+        def fn():
+            attempts.append(1)
+            if len(attempts) < 3:
+                raise ConnectionError("stream dropped")
+            return LLMCallResult(text="recovered", provider="openai", model="gpt-4o",
+                                 input_tokens=10, output_tokens=5,
+                                 latency_ms=100, cost_usd=None)
+
+        # Monkey-patch sleep so test runs fast
+        import app.services.llm as llm_mod
+        original_sleep = llm_mod.time.sleep
+        llm_mod.time.sleep = lambda _: None
+        try:
+            result = _retry_call(fn)
+        finally:
+            llm_mod.time.sleep = original_sleep
+
+        assert result.text == "recovered"
+        assert len(attempts) == 3
+
+    def test_does_not_retry_provider_error(self):
+        from app.services.llm import _retry_call, ProviderError
+        attempts = []
+
+        def fn():
+            attempts.append(1)
+            raise ProviderError("OPENAI_API_KEY not set")
+
+        with pytest.raises(ProviderError):
+            _retry_call(fn)
+        assert len(attempts) == 1  # no retry for missing key
+
+    def test_reraises_after_max_retries(self):
+        from app.services.llm import _retry_call, _APP_RETRIES
+        attempts = []
+
+        def fn():
+            attempts.append(1)
+            raise ConnectionError("always fails")
+
+        import app.services.llm as llm_mod
+        llm_mod.time.sleep = lambda _: None
+        try:
+            with pytest.raises(ConnectionError):
+                _retry_call(fn)
+        finally:
+            import time as _time
+            llm_mod.time.sleep = _time.sleep
+
+        assert len(attempts) == _APP_RETRIES

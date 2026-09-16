@@ -16,7 +16,7 @@ import re
 import string
 from typing import Sequence
 
-from app.graders.base import EvaluationResult
+from app.graders.base import EvaluationResult, SubScore
 
 _PUNCT = str.maketrans("", "", string.punctuation)
 _ARTICLE_RE = re.compile(r"\b(a|an|the)\b")
@@ -39,6 +39,9 @@ def exact_match(prediction: str, ground_truth: str) -> EvaluationResult:
     return EvaluationResult(
         score=score,
         reason=f"exact_match: {p!r} {'==' if score else '!='} {g!r}",
+        subscores=[SubScore(name="exact_match", score=score, metadata={
+            "prediction": prediction[:200], "ground_truth": ground_truth[:200],
+        })],
     )
 
 
@@ -52,6 +55,9 @@ def contains(prediction: str, substring: str) -> EvaluationResult:
     return EvaluationResult(
         score=score,
         reason=f"contains: {s!r} {'in' if score else 'not in'} prediction",
+        subscores=[SubScore(name="contains", score=score, metadata={
+            "substring": substring[:200], "prediction": prediction[:200],
+        })],
     )
 
 
@@ -63,6 +69,9 @@ def contains_any(prediction: str, substrings: Sequence[str]) -> EvaluationResult
     return EvaluationResult(
         score=score,
         reason=f"contains_any: matched={matched!r} of {list(substrings)!r}",
+        subscores=[SubScore(name="contains_any", score=score, metadata={
+            "matched": matched, "candidates": list(substrings)[:20],
+        })],
     )
 
 
@@ -74,6 +83,9 @@ def contains_all(prediction: str, substrings: Sequence[str]) -> EvaluationResult
     return EvaluationResult(
         score=score,
         reason=f"contains_all: missing={missing!r} of {list(substrings)!r}",
+        subscores=[SubScore(name="contains_all", score=score, metadata={
+            "missing": missing, "required": list(substrings)[:20],
+        })],
     )
 
 
@@ -108,17 +120,23 @@ def numeric_match(
     if tolerance == 0.0:
         score = 1.0 if pred_val == exp_val else 0.0
         reason = f"numeric_match: {pred_val} {'==' if score else '!='} {exp_val}"
+        meta: dict = {"pred": pred_val, "expected": exp_val}
     elif relative:
         denom = abs(exp_val) if exp_val != 0 else 1.0
         err = abs(pred_val - exp_val) / denom
         score = 1.0 if err <= tolerance else 0.0
         reason = f"numeric_match: rel_err={err:.4f} vs tolerance={tolerance}"
+        meta = {"pred": pred_val, "expected": exp_val, "rel_err": round(err, 6), "tolerance": tolerance}
     else:
         err = abs(pred_val - exp_val)
         score = 1.0 if err <= tolerance else 0.0
         reason = f"numeric_match: abs_err={err} vs tolerance={tolerance}"
+        meta = {"pred": pred_val, "expected": exp_val, "abs_err": err, "tolerance": tolerance}
 
-    return EvaluationResult(score=score, reason=reason)
+    return EvaluationResult(
+        score=score, reason=reason,
+        subscores=[SubScore(name="numeric_match", score=score, metadata=meta)],
+    )
 
 
 # ── F1 ────────────────────────────────────────────────────────────────────────
@@ -154,4 +172,9 @@ def f1_score(prediction: str, ground_truth: str) -> EvaluationResult:
     return EvaluationResult(
         score=f1,
         reason=f"f1: precision={precision:.3f} recall={recall:.3f} f1={f1:.3f}",
+        subscores=[SubScore(name="f1_score", score=f1, metadata={
+            "precision": round(precision, 4),
+            "recall": round(recall, 4),
+            "common_tokens": sorted(common),
+        })],
     )

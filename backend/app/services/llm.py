@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 # Importing config loads backend/.env into the environment, so the os.getenv key
 # reads below work even when nothing else has touched settings yet (e.g. the
@@ -151,6 +151,41 @@ def _key(provider: str) -> str:
 # agent timeout. The SDKs' own default is ~10 min, which is far too loose here.
 LLM_TIMEOUT_SEC = 120.0
 LLM_MAX_RETRIES = 2  # SDK-level retries on transient errors (429 / 5xx / connection)
+_APP_RETRIES = 3     # application-level retries for mid-stream / connection drops
+
+
+def _retry_call(fn: "Callable[[], LLMCallResult]") -> "LLMCallResult":
+    """Application-level retry wrapper for transient stream/connection failures.
+
+    The SDKs handle 429 / 5xx internally (LLM_MAX_RETRIES). This layer catches
+    lower-level drops — read timeouts, incomplete responses, connection resets —
+    that slip through. Backs off 1s then 2s between attempts.
+    """
+    import socket
+
+    last_exc: Exception | None = None
+    for attempt in range(_APP_RETRIES):
+        try:
+            return fn()
+        except ProviderError:
+            raise  # missing key / package — not retryable
+        except Exception as exc:
+            # Catch connection-level / read errors from any HTTP library
+            is_transient = any(
+                kw in type(exc).__name__.lower()
+                for kw in ("connect", "read", "timeout", "stream", "network", "remote", "eof")
+            ) or isinstance(exc, (ConnectionError, TimeoutError, socket.error, OSError))
+            if not is_transient:
+                raise
+            last_exc = exc
+            if attempt < _APP_RETRIES - 1:
+                wait = 2 ** attempt  # 1s, 2s
+                log.warning(
+                    "llm_stream_retry",
+                    extra={"attempt": attempt + 1, "wait_s": wait, "error": str(exc)[:120]},
+                )
+                time.sleep(wait)
+    raise last_exc  # type: ignore[misc]
 
 
 def _call_anthropic(model: str, system: str, user: str, max_tokens: int) -> LLMCallResult:
@@ -262,20 +297,17 @@ def call_llm(
     not just forward the model's answer."""
     provider = canonical_provider(provider)
     if provider == "anthropic":
-        result = _call_anthropic(model, system, user, max_tokens)
+        result = _retry_call(lambda: _call_anthropic(model, system, user, max_tokens))
     elif provider == "openai":
-        result = _call_openai_compatible(
+        result = _retry_call(lambda: _call_openai_compatible(
             model, system, user, max_tokens, provider="openai", base_url=None
-        )
+        ))
     elif provider == "openrouter":
-        result = _call_openai_compatible(
-            model,
-            system,
-            user,
-            max_tokens,
+        result = _retry_call(lambda: _call_openai_compatible(
+            model, system, user, max_tokens,
             provider="openrouter",
             base_url="https://openrouter.ai/api/v1",
-        )
+        ))
     else:
         raise ProviderError(f"Unknown provider: {provider}")
 

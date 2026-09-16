@@ -32,6 +32,7 @@ from app.graders.text import (
     numeric_match,
 )
 from app.graders.bash import BashGrader
+from app.graders.llm_judge import LLMJudgeGrader
 
 __all__ = [
     "EvaluationResult",
@@ -46,4 +47,5 @@ __all__ = [
     "numeric_match",
     "f1_score",
     "BashGrader",
+    "LLMJudgeGrader",
 ]
